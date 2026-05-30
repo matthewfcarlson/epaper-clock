@@ -40,10 +40,14 @@ const float CALIBRATION_FACTOR = 0.968;
 #define NTP_SYNC_INTERVAL_S (6UL * 3600)
 
 // How long to stay awake on first boot for IDE access (60 seconds)
+#ifndef FIRST_BOOT_AWAKE_MS
 #define FIRST_BOOT_AWAKE_MS 60000
+#endif
 
 // How long to listen for OTA after button wake (90 seconds)
+#ifndef OTA_LISTEN_MS
 #define OTA_LISTEN_MS 90000
+#endif
 
 // Weather update interval in seconds (6 hours)
 #define WEATHER_SYNC_INTERVAL_S (6UL * 3600)
