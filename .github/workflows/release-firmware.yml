@@ -1,0 +1,80 @@
+name: Release firmware
+
+# Push a tag matching vX.Y.Z (must match FIRMWARE_VERSION in src/version.h,
+# with a leading 'v') to build and publish a GitHub release. Devices poll
+# this repo's latest release nightly (see CLAUDE.md's "Firmware auto-update"
+# section) and self-flash when the tag is newer than their running version.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  # softprops/action-gh-release needs this to create the release and generate
+  # notes with the default GITHUB_TOKEN — without it the API call 403s with
+  # "Resource not accessible by integration" (repo/org default is read-only).
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches FIRMWARE_VERSION
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' src/version.h | tr -d '"')"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match FIRMWARE_VERSION \"$version\" in src/version.h"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      # config.h is gitignored (it holds real WiFi/API credentials), so the
+      # release build assembles it from repo secrets instead of the CI job's
+      # placeholder values — this .bin is what devices actually self-flash
+      # via the nightly OTA check, so it needs real credentials or they'd
+      # lose WiFi on update.
+      - name: Write config.h from secrets
+        env:
+          WIFI_SSID: ${{ secrets.WIFI_SSID }}
+          WIFI_PASS: ${{ secrets.WIFI_PASS }}
+          TZ_INFO: ${{ secrets.TZ_INFO }}
+          OWM_API_KEY: ${{ secrets.OWM_API_KEY }}
+          OWM_LAT: ${{ secrets.OWM_LAT }}
+          OWM_LON: ${{ secrets.OWM_LON }}
+        run: |
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          cat > src/config.h <<EOF
+          #pragma once
+          const char *WIFI_SSID = "$WIFI_SSID";
+          const char *WIFI_PASS = "$WIFI_PASS";
+          const char *TZ_INFO = "$TZ_INFO";
+          const char *NTP_SERVER1 = "pool.ntp.org";
+          const char *NTP_SERVER2 = "time.nist.gov";
+          const char *OWM_API_KEY = "$OWM_API_KEY";
+          const float OWM_LAT = $OWM_LAT;
+          const float OWM_LON = $OWM_LON;
+          const bool OTA_UPDATES_ENABLED = true;
+          const char *OTA_GITHUB_OWNER = "${{ github.repository_owner }}";
+          const char *OTA_GITHUB_REPO = "$repo_name";
+          EOF
+
+      - name: Build firmware
+        run: pio run
+
+      - name: Rename build artifact
+        run: cp .pio/build/seeed_xiao_esp32s3/firmware.bin firmware.bin
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: firmware.bin
+          generate_release_notes: true

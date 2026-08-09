@@ -97,7 +97,7 @@ All state that must survive a deep sleep cycle is declared `RTC_DATA_ATTR`. On e
 2. Checks if NTP re-sync is due (every 6 hours) — shows "Syncing…" screen if so
 3. Checks if weather re-fetch is due (every 6 hours, daytime only)
 4. Draws the clock and calls `epaper.update()`
-5. Sleeps until the next minute boundary (day) or next 5-minute boundary (night, 1–6am)
+5. Sleeps until the next 5-minute boundary (day) or next 15-minute boundary (night, 1–6am). The displayed time is always rounded to the nearest 5-minute mark, matching this cadence.
 
 Button press (any of D1/D2/D4) wakes via `ext1` and triggers OTA mode: the device connects to WiFi, starts `ArduinoOTA`, draws an OTA screen (showing the listen countdown, hostname/IP, and running firmware version), and listens for 90 seconds before falling back to normal clock+sleep. If WiFi fails to connect, it skips the listen window entirely rather than burning battery waiting.
 
@@ -107,7 +107,7 @@ First boot stays awake for 60 seconds so the serial monitor (`pio device monitor
 
 On normal (non-button) wakes during the night window (1am-6am), and at most once every 24 hours, the device checks `https://api.github.com/repos/{OTA_GITHUB_OWNER}/{OTA_GITHUB_REPO}/releases/latest`. If the release's tag is a newer semver than `version.h`'s `FIRMWARE_VERSION`, it downloads the first `.bin` asset attached to that release, flashes it via `Update.h`, and reboots. A release with no `.bin` asset is ignored. A failed download/flash is retried on the next nightly check, up to `OTA_MAX_UPDATE_ATTEMPTS`, before that version is skipped until a newer tag appears.
 
-To ship an update this way: bump `FIRMWARE_VERSION` in `src/version.h`, build the `.bin` (`pio run`, output at `.pio/build/seeed_xiao_esp32s3/firmware.bin` — or let the `firmware` CI job produce it as a build artifact), and publish it as a GitHub release with a matching tag (e.g. `v1.0.1`).
+To ship an update: bump `FIRMWARE_VERSION` in `src/version.h`, commit, then `git tag v1.0.1 && git push origin v1.0.1`. `.github/workflows/release-firmware.yml` builds and publishes the release automatically — it rejects the push if the tag doesn't match `FIRMWARE_VERSION`. That workflow assembles `src/config.h` from repo secrets (`WIFI_SSID`, `WIFI_PASS`, `TZ_INFO`, `OWM_API_KEY`, `OWM_LAT`, `OWM_LON`) rather than the CI job's placeholder values, since this `.bin` is what devices actually self-flash — building it with fake WiFi credentials would strand every device that updates. Set those secrets once via the repo's Settings → Secrets and variables → Actions (or `gh secret set NAME`).
 
 Caveat: there's no automatic rollback if a released build boot-loops — that needs the ESP-IDF bootloader's rollback feature enabled via a custom `sdkconfig`, which this project doesn't set up, so a bad release stays flashed (recoverable via USB or a fixed follow-up release) rather than self-healing like `ArduinoOTA`'s partition-swap would with proper rollback support. Set `OTA_UPDATES_ENABLED = false` in `src/config.h` to disable the check entirely.
 

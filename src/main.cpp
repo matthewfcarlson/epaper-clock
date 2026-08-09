@@ -20,11 +20,13 @@
 #include "version.h"
 #include "BigDigits.h"
 
-// Sleep durations
-#define SLEEP_DAY_US (1ULL * 60ULL * 1000000)  // 5 minutes
-#define SLEEP_NIGHT_US (5ULL * 60 * 1000000)  // 15 minutes
+// Wake/update interval, in minutes, aligned to the clock (e.g. :00/:05/:10... for 5)
+#define DAY_WAKE_INTERVAL_MIN 5
+#define NIGHT_WAKE_INTERVAL_MIN 15
 #define NIGHT_START_HOUR 1
 #define NIGHT_END_HOUR 6
+// Fallback sleep duration if the current time isn't available (e.g. NTP never synced)
+#define SLEEP_FALLBACK_US ((uint64_t)DAY_WAKE_INTERVAL_MIN * 60ULL * 1000000ULL)
 
 #define BATTERY_PIN 1  // GPIO1 (A0) - BAT_ADC
 #define ADC_EN_PIN 6   // GPIO6 (A5) - ADC_EN
@@ -247,6 +249,14 @@ void drawClock(float batteryVoltage) {
     min = timeinfo.tm_min;
   }
 
+  // Round the displayed time to the nearest 5-minute mark, matching the
+  // cadence the device actually wakes/updates at.
+  min = ((min + 2) / 5) * 5;
+  if (min >= 60) {
+    min = 0;
+    hour = (hour + 1) % 24;
+  }
+
   epaper.fillScreen(TFT_WHITE);
   epaper.setTextColor(TFT_BLACK, TFT_WHITE);
 
@@ -318,6 +328,7 @@ uint64_t getSleepDuration() {
   struct tm timeinfo;
   if (getLocalTime(&timeinfo, 100)) {
     int h = timeinfo.tm_hour;
+    int m = timeinfo.tm_min;
     int s = timeinfo.tm_sec;
 
     // Seconds until the next whole minute
@@ -325,22 +336,17 @@ uint64_t getSleepDuration() {
     if (secsToNextMin <= 0) secsToNextMin = 60;
 
     bool isNight = (h >= NIGHT_START_HOUR) && (h < NIGHT_END_HOUR);
-    int intervalMins = isNight ? 5 : 1;
+    int intervalMins = isNight ? NIGHT_WAKE_INTERVAL_MIN : DAY_WAKE_INTERVAL_MIN;
 
-    // For night mode, align to the next 5-minute mark
-    if (isNight) {
-      int m = timeinfo.tm_min;
-      int minsToNext5 = intervalMins - (m % intervalMins);
-      if (minsToNext5 == intervalMins && s == 0) minsToNext5 = intervalMins;
-      uint64_t totalSecs = (uint64_t)(minsToNext5 - 1) * 60 + secsToNextMin;
-      Serial.printf("Sleep: hour=%d, %llu seconds until next 5-min mark\n", h, totalSecs);
-      return totalSecs * 1000000ULL;
-    }
+    // Align wake to the next interval-minute mark (e.g. :00/:05/:10... for 5 min)
+    int minsToNextMark = intervalMins - (m % intervalMins);
+    if (minsToNextMark == intervalMins && s == 0) minsToNextMark = intervalMins;
+    uint64_t totalSecs = (uint64_t)(minsToNextMark - 1) * 60 + secsToNextMin;
 
-    Serial.printf("Sleep: hour=%d, %d seconds until next minute\n", h, secsToNextMin);
-    return (uint64_t)secsToNextMin * 1000000ULL;
+    Serial.printf("Sleep: hour=%d, %llu seconds until next %d-min mark\n", h, totalSecs, intervalMins);
+    return totalSecs * 1000000ULL;
   }
-  return SLEEP_DAY_US;
+  return SLEEP_FALLBACK_US;
 }
 
 #endif
