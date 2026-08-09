@@ -115,6 +115,11 @@ struct SerialClass {
     void begin(int)  {}
     void flush()     { fflush(stdout); }
 
+    // No simulated input source — location provisioning's serial protocol
+    // compiles against this but is never exercised interactively in sim.
+    int available()  { return 0; }
+    int read()        { return -1; }
+
     void print(const char *s)     { fputs(s ? s : "", stdout); }
     void print(const String &s)   { fputs(s.c_str(), stdout); }
     void print(int v)             { printf("%d", v); }

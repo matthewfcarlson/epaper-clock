@@ -42,10 +42,9 @@ const char *TZ_INFO = "CST6CDT,M3.2.0,M11.1.0";
 const char *NTP_SERVER1 = "pool.ntp.org";
 const char *NTP_SERVER2 = "time.nist.gov";
 
-// OpenWeatherMap
+// OpenWeatherMap — lat/lon are set at runtime by the user (see "Location
+// provisioning" below), not here
 const char *OWM_API_KEY = "your_key";
-const float OWM_LAT = 30.52;
-const float OWM_LON = -97.72;
 
 // Firmware auto-update (GitHub Releases) — see "Firmware auto-update" below
 const bool OTA_UPDATES_ENABLED = true;
@@ -77,6 +76,7 @@ Key simulator behaviors vs. real hardware:
 - Time uses the Mac's real system clock (same timezone logic as the device)
 - `esp_deep_sleep_start()` signals the main loop to pause (capped at 5 s), then reboots the cycle by calling `setup()` again — `RTC_DATA_ATTR` globals persist as they would across real deep sleep
 - `FIRST_BOOT_AWAKE_MS` and `OTA_LISTEN_MS` are overridden to 0 so the 60 s / 90 s wait periods are skipped
+- `Preferences` (location config storage) is stubbed as an in-memory map — it persists for the life of one `./sim` run like the `RTC_DATA_ATTR` globals do, but isn't disk-backed, so it doesn't survive across separate `./sim` invocations the way real NVS survives power loss. `Serial.available()`/`read()` are stubbed to report "no input," so the location-provisioning serial protocol compiles but is never exercised interactively in the simulator.
 
 ## Architecture
 
@@ -99,17 +99,29 @@ All state that must survive a deep sleep cycle is declared `RTC_DATA_ATTR`. On e
 4. Draws the clock and calls `epaper.update()`
 5. Sleeps until the next 5-minute boundary (day) or next 15-minute boundary (night, 1–6am). The displayed time is always rounded to the nearest 5-minute mark, matching this cadence.
 
-Button press (any of D1/D2/D4) wakes via `ext1` and triggers OTA mode: the device connects to WiFi, starts `ArduinoOTA`, draws an OTA screen (showing the listen countdown, hostname/IP, and running firmware version), and listens for 90 seconds before falling back to normal clock+sleep. If WiFi fails to connect, it skips the listen window entirely rather than burning battery waiting.
+Button press (any of D1/D2/D4) wakes via `ext1` and triggers a maintenance window: the device connects to WiFi, and if that succeeds starts `ArduinoOTA`; either way it draws a maintenance screen (showing the listen countdown, hostname/IP if connected, and running firmware version) and listens for 90 seconds — over WiFi for OTA, and over the USB serial connection for location provisioning (see below) — before falling back to normal clock+sleep. Unlike OTA, serial provisioning doesn't need WiFi, so the window stays open even if WiFi failed to connect.
 
-First boot stays awake for 60 seconds so the serial monitor (`pio device monitor`) / OTA can connect before the first sleep.
+First boot stays awake for 60 seconds so the serial monitor (`pio device monitor`) / OTA / location provisioning can connect before the first sleep.
 
 ### Firmware auto-update (GitHub Releases)
 
 On normal (non-button) wakes during the night window (1am-6am), and at most once every 24 hours, the device checks `https://api.github.com/repos/{OTA_GITHUB_OWNER}/{OTA_GITHUB_REPO}/releases/latest`. If the release's tag is a newer semver than `version.h`'s `FIRMWARE_VERSION`, it downloads the first `.bin` asset attached to that release, flashes it via `Update.h`, and reboots. A release with no `.bin` asset is ignored. A failed download/flash is retried on the next nightly check, up to `OTA_MAX_UPDATE_ATTEMPTS`, before that version is skipped until a newer tag appears.
 
-To ship an update: bump `FIRMWARE_VERSION` in `src/version.h`, commit, then `git tag v1.0.1 && git push origin v1.0.1`. `.github/workflows/release-firmware.yml` builds and publishes the release automatically — it rejects the push if the tag doesn't match `FIRMWARE_VERSION`. That workflow assembles `src/config.h` from repo secrets (`WIFI_SSID`, `WIFI_PASS`, `TZ_INFO`, `OWM_API_KEY`, `OWM_LAT`, `OWM_LON`) rather than the CI job's placeholder values, since this `.bin` is what devices actually self-flash — building it with fake WiFi credentials would strand every device that updates. Set those secrets once via the repo's Settings → Secrets and variables → Actions (or `gh secret set NAME`).
+To ship an update: bump `FIRMWARE_VERSION` in `src/version.h`, commit, then `git tag v1.0.1 && git push origin v1.0.1`. `.github/workflows/release-firmware.yml` builds and publishes the release automatically — it rejects the push if the tag doesn't match `FIRMWARE_VERSION`. That workflow assembles `src/config.h` from repo secrets (`WIFI_SSID`, `WIFI_PASS`, `TZ_INFO`, `OWM_API_KEY`) rather than the CI job's placeholder values, since this `.bin` is what devices actually self-flash — building it with fake WiFi credentials would strand every device that updates. Set those secrets once via the repo's Settings → Secrets and variables → Actions (or `gh secret set NAME`).
 
 Caveat: there's no automatic rollback if a released build boot-loops — that needs the ESP-IDF bootloader's rollback feature enabled via a custom `sdkconfig`, which this project doesn't set up, so a bad release stays flashed (recoverable via USB or a fixed follow-up release) rather than self-healing like `ArduinoOTA`'s partition-swap would with proper rollback support. Set `OTA_UPDATES_ENABLED = false` in `src/config.h` to disable the check entirely.
+
+### Location provisioning (weather lat/lon)
+
+Weather's lat/lon is no longer a build-time constant — it's set by the user at runtime and stored in NVS via the ESP32 `Preferences` library (namespace `"clockcfg"`, keys `loc_set`/`lat`/`lon`), so one firmware build works for any device/location and there's nothing location-specific to bake in or leak via a repo secret. Until set, weather fetching is skipped entirely (no bogus `0,0` lookup) and the clock face shows a short "press button + connect USB" hint in the weather corner.
+
+Setting it: press a button to enter the maintenance window (see above), plug in a USB cable, and open `docs/provision.html` (hosted via GitHub Pages, or served locally with e.g. `python3 -m http.server` from `docs/` — Web Serial requires a secure or localhost context) in Chrome or Edge on a computer. The page uses the [Web Serial API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Serial_API) to talk to the device over the same native-USB CDC connection already used for flashing/`pio device monitor` — no new USB descriptors, no pairing. It reads the device's current status and lets you enter lat/lon manually or via the browser's geolocation.
+
+Wire protocol, plain text lines over the existing `Serial` (commands prefixed `CFG `, replies prefixed `>>` so the page can filter them out of ordinary debug logging on the same stream):
+- `CFG GET_STATUS` → `>>STATUS configured=0|1 lat=<f> lon=<f> fw=<version>`
+- `CFG SET_LOCATION <lat> <lon>` → `>>OK SET_LOCATION` or `>>ERR RANGE|PARSE`
+
+Web Serial is Chrome/Edge desktop only (no Safari, no iOS on any browser).
 
 ### Display
 

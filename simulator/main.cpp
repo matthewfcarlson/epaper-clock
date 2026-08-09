@@ -13,6 +13,7 @@
 #include "stubs/ArduinoOTA.h"
 #include "stubs/esp_sleep.h"
 #include "stubs/time_compat.h"
+#include "stubs/Preferences.h"
 
 // Enable the display code path (same flag the sketch uses to guard display functions)
 #define EPAPER_ENABLE

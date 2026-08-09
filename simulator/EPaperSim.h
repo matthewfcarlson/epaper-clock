@@ -181,6 +181,12 @@ public:
         if (!exportMode()) SDL_Delay(500);
     }
 
+    // Sim has no separate backing buffer / waveform to distinguish partial
+    // from full refresh — both just present the current frame.
+    void updataPartial(int, int, int, int) {
+        update();
+    }
+
     void cleanup(int code) {
         TTF_Quit();
         if (renderer_) SDL_DestroyRenderer(renderer_);

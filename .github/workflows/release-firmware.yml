@@ -48,8 +48,6 @@ jobs:
           WIFI_PASS: ${{ secrets.WIFI_PASS }}
           TZ_INFO: ${{ secrets.TZ_INFO }}
           OWM_API_KEY: ${{ secrets.OWM_API_KEY }}
-          OWM_LAT: ${{ secrets.OWM_LAT }}
-          OWM_LON: ${{ secrets.OWM_LON }}
         run: |
           repo_name="${GITHUB_REPOSITORY#*/}"
           cat > src/config.h <<EOF
@@ -60,8 +58,6 @@ jobs:
           const char *NTP_SERVER1 = "pool.ntp.org";
           const char *NTP_SERVER2 = "time.nist.gov";
           const char *OWM_API_KEY = "$OWM_API_KEY";
-          const float OWM_LAT = $OWM_LAT;
-          const float OWM_LON = $OWM_LON;
           const bool OTA_UPDATES_ENABLED = true;
           const char *OTA_GITHUB_OWNER = "${{ github.repository_owner }}";
           const char *OTA_GITHUB_REPO = "$repo_name";

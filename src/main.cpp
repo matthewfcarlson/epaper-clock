@@ -15,6 +15,7 @@
 #include <HTTPClient.h>
 #include <ArduinoOTA.h>
 #include <Update.h>
+#include <Preferences.h>
 #include <time.h>
 #include "config.h"
 #include "version.h"
@@ -63,6 +64,16 @@ const float CALIBRATION_FACTOR = 0.968;
 // Give up retrying a specific release after this many failed download/flash attempts
 #define OTA_MAX_UPDATE_ATTEMPTS 3
 
+// Lower WiFi TX power to reduce peak radio current during WiFi-active wakes.
+// Default max is WIFI_POWER_19_5dBm; for a router within typical home range
+// this holds a reliable link while drawing meaningfully less current.
+#define WIFI_TX_POWER WIFI_POWER_11dBm
+
+// Most wakes use the panel's partial-refresh waveform (faster, lower current,
+// no full-panel flash) instead of a full refresh. Partial refreshes
+// accumulate visible ghosting over time, so force a full refresh periodically.
+#define FULL_REFRESH_EVERY_N_PARTIAL 12
+
 // Persistent across deep sleep
 RTC_DATA_ATTR uint32_t wakeCount = 0;
 RTC_DATA_ATTR bool everSynced = false;
@@ -82,11 +93,93 @@ RTC_DATA_ATTR time_t bootEpoch = 0;
 RTC_DATA_ATTR time_t lastOtaCheckTime = 0;
 RTC_DATA_ATTR char otaFailedVersion[16] = "";
 RTC_DATA_ATTR uint8_t otaFailCount = 0;
+// Cached AP channel/BSSID from the last successful connect, so the next
+// WiFi.begin() can skip the AP scan phase. Invalidated on a failed connect
+// so a changed/rebooted AP heals within one wake instead of failing repeatedly.
+RTC_DATA_ATTR uint8_t wifiChannel = 0;
+RTC_DATA_ATTR uint8_t wifiBssid[6] = {0, 0, 0, 0, 0, 0};
+RTC_DATA_ATTR bool wifiBssidValid = false;
+// Wakes since the last full (ghost-clearing) e-paper refresh
+RTC_DATA_ATTR uint16_t partialRefreshCount = 0;
 
 float lastVoltage = 0;
 unsigned long setupDoneAt = 0;
 bool otaMode = false;
 unsigned long otaStartedAt = 0;
+
+// User-provisioned weather location (see "Location provisioning" in
+// CLAUDE.md), persisted in NVS via Preferences rather than RTC_DATA_ATTR —
+// unlike RTC memory, NVS survives full power loss, which is what a
+// user-set preference needs.
+Preferences prefs;
+float userLat = 0;
+float userLon = 0;
+bool locationConfigured = false;
+
+void loadLocationConfig() {
+  prefs.begin("clockcfg", true);
+  locationConfigured = prefs.getBool("loc_set", false);
+  userLat = prefs.getFloat("lat", 0);
+  userLon = prefs.getFloat("lon", 0);
+  prefs.end();
+}
+
+void saveLocationConfig(float lat, float lon) {
+  prefs.begin("clockcfg", false);
+  prefs.putBool("loc_set", true);
+  prefs.putFloat("lat", lat);
+  prefs.putFloat("lon", lon);
+  prefs.end();
+  userLat = lat;
+  userLon = lon;
+  locationConfigured = true;
+}
+
+// Non-blocking line-based provisioning protocol over the same USB serial
+// connection used for flashing/monitoring. Commands from the browser are
+// prefixed "CFG ", replies are prefixed ">>" so a Web Serial client can
+// filter protocol lines out of ordinary Serial.print debug output on the
+// same stream. Only active during the button-wake maintenance window and
+// the first-boot awake window (see loop()).
+//   CFG GET_STATUS              -> >>STATUS configured=0|1 lat=<f> lon=<f> fw=<version>
+//   CFG SET_LOCATION <lat> <lon> -> >>OK SET_LOCATION | >>ERR RANGE|PARSE
+#define PROVISION_LINE_MAX 64
+void handleSerialProvisioning() {
+  static char lineBuf[PROVISION_LINE_MAX];
+  static size_t lineLen = 0;
+
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == '\r') continue;
+    if (c != '\n') {
+      if (lineLen < sizeof(lineBuf) - 1) lineBuf[lineLen++] = c;
+      continue;
+    }
+
+    lineBuf[lineLen] = '\0';
+    lineLen = 0;
+    if (lineBuf[0] == '\0') continue;
+
+    if (strcmp(lineBuf, "CFG GET_STATUS") == 0) {
+      Serial.printf(">>STATUS configured=%d lat=%.4f lon=%.4f fw=%s\n",
+                     locationConfigured ? 1 : 0, userLat, userLon, FIRMWARE_VERSION);
+    } else if (strncmp(lineBuf, "CFG SET_LOCATION ", 18) == 0) {
+      float lat, lon;
+      if (sscanf(lineBuf + 18, "%f %f", &lat, &lon) == 2) {
+        if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+          Serial.println(">>ERR RANGE");
+        } else {
+          saveLocationConfig(lat, lon);
+          Serial.println(">>OK SET_LOCATION");
+        }
+      } else {
+        Serial.println(">>ERR PARSE");
+      }
+    } else {
+      Serial.println(">>ERR UNKNOWN_CMD");
+    }
+  }
+}
 
 #ifdef EPAPER_ENABLE
 
@@ -166,10 +259,10 @@ void drawBatteryIcon(int x, int y, int percent) {
   epaper.drawString(buf, x - textW - 4, y + 1, 2);
 }
 
-// Draw OTA listening screen — download arrow icon + text.
-// wifiConnected controls whether we show the listen countdown + connection
-// info, or a "connect failed" message (caller skips the listen window in
-// that case, so this just explains why nothing happened).
+// Draw the maintenance-mode listening screen — download arrow icon + text.
+// wifiConnected controls whether we show OTA connection info (hostname/IP)
+// or a "WiFi failed" note; either way, USB serial provisioning is available
+// for the full listen window regardless of WiFi state.
 void drawOtaScreen(bool wifiConnected) {
   epaper.fillScreen(TFT_WHITE);
   epaper.setTextColor(TFT_BLACK, TFT_WHITE);
@@ -185,20 +278,21 @@ void drawOtaScreen(bool wifiConnected) {
   epaper.fillRect(cx - 30, cy + 48, 60, 4, TFT_BLACK);
 
   epaper.setTextSize(1);
-  epaper.drawCentreString("OTA Update Ready", cx, cy + 70, 4);
+  epaper.drawCentreString("Maintenance Mode", cx, cy + 70, 4);
 
   char lineBuf[48];
+  snprintf(lineBuf, sizeof(lineBuf), "Listening for %lus...", (unsigned long)(OTA_LISTEN_MS / 1000));
+  epaper.drawCentreString(lineBuf, cx, cy + 100, 2);
   if (wifiConnected) {
-    snprintf(lineBuf, sizeof(lineBuf), "Listening for %lus...", (unsigned long)(OTA_LISTEN_MS / 1000));
-    epaper.drawCentreString(lineBuf, cx, cy + 100, 2);
-    snprintf(lineBuf, sizeof(lineBuf), "epaper-clock.local  %s", WiFi.localIP().toString().c_str());
-    epaper.drawCentreString(lineBuf, cx, cy + 130, 2);
+    snprintf(lineBuf, sizeof(lineBuf), "OTA: epaper-clock.local  %s", WiFi.localIP().toString().c_str());
   } else {
-    epaper.drawCentreString("WiFi connect failed", cx, cy + 100, 2);
+    snprintf(lineBuf, sizeof(lineBuf), "OTA unavailable (WiFi failed)");
   }
+  epaper.drawCentreString(lineBuf, cx, cy + 130, 2);
+  epaper.drawCentreString("Connect USB + open provision.html to set location", cx, cy + 155, 2);
 
   snprintf(lineBuf, sizeof(lineBuf), "fw %s", FIRMWARE_VERSION);
-  epaper.drawCentreString(lineBuf, cx, cy + 160, 2);
+  epaper.drawCentreString(lineBuf, cx, cy + 185, 2);
 }
 
 // Draw "installing firmware update" screen shown during a nightly auto-update
@@ -304,6 +398,10 @@ void drawClock(float batteryVoltage) {
     char weatherLine[48];
     snprintf(weatherLine, sizeof(weatherLine), "%s  %d°/%d°F", weatherDesc, weatherHigh, weatherLow);
     epaper.drawString(weatherLine, 10, SCREEN_H - 30, 1);
+  } else if (!locationConfigured) {
+    epaper.setFreeFont(&FreeSans12pt7b);
+    epaper.setTextSize(1);
+    epaper.drawString("Press button + connect USB to set location", 10, SCREEN_H - 30, 1);
   }
 
   // Battery icon in bottom-right corner
@@ -321,6 +419,20 @@ void drawClock(float batteryVoltage) {
     epaper.setTextSize(1);
     int uptimeW = epaper.textWidth(uptimeBuf, 1);
     epaper.drawString(uptimeBuf, (SCREEN_W - 10) - uptimeW, SCREEN_H - 46, 1);
+  }
+}
+
+// Pushes the drawn clock face to the panel. Most wakes use a partial refresh
+// (faster, lower current, no full-panel flash); periodically forces a full
+// refresh since partial refreshes alone accumulate visible ghosting.
+void refreshClockDisplay() {
+  bool forceFull = (partialRefreshCount == 0) || (partialRefreshCount >= FULL_REFRESH_EVERY_N_PARTIAL);
+  if (forceFull) {
+    epaper.update();
+    partialRefreshCount = 1;
+  } else {
+    epaper.updataPartial(0, 0, SCREEN_W, SCREEN_H);
+    partialRefreshCount++;
   }
 }
 
@@ -354,7 +466,15 @@ uint64_t getSleepDuration() {
 void connectWiFi() {
   Serial.print("Connecting to WiFi");
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.setTxPower(WIFI_TX_POWER);
+
+  // Skip the AP scan phase when we already know the channel/BSSID from a
+  // prior successful connect this charge cycle.
+  if (wifiBssidValid) {
+    WiFi.begin(WIFI_SSID, WIFI_PASS, wifiChannel, wifiBssid);
+  } else {
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+  }
 
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
@@ -366,8 +486,14 @@ void connectWiFi() {
     Serial.println(" connected!");
     Serial.print("IP: ");
     Serial.println(WiFi.localIP());
+    wifiChannel = WiFi.channel();
+    memcpy(wifiBssid, WiFi.BSSID(), 6);
+    wifiBssidValid = true;
   } else {
     Serial.println(" failed.");
+    // Cached channel/BSSID may be stale (AP moved/rebooted) — drop it so the
+    // next attempt falls back to a full scan instead of failing again.
+    wifiBssidValid = false;
   }
 }
 
@@ -410,7 +536,7 @@ bool fetchWeather() {
   char url[256];
   snprintf(url, sizeof(url),
     "http://api.openweathermap.org/data/2.5/weather?lat=%.2f&lon=%.2f&units=imperial&appid=%s",
-    OWM_LAT, OWM_LON, OWM_API_KEY);
+    userLat, userLon, OWM_API_KEY);
 
   Serial.println("Fetching weather...");
   http.begin(url);
@@ -678,7 +804,8 @@ float readBatteryVoltage() {
 
 void setup() {
   Serial.begin(115200);
-  delay(500);
+
+  loadLocationConfig();
 
   wakeCount++;
   Serial.printf("Wake #%u\n", wakeCount);
@@ -763,7 +890,7 @@ void setup() {
   }
   time_t weatherNow = time(nullptr);
   bool weatherDue = (weatherNow - lastWeatherSyncTime) >= WEATHER_SYNC_INTERVAL_S;
-  bool shouldFetchWeather = isDaytime && (weatherDue || (weatherRetries > 0 && weatherRetries <= WEATHER_MAX_RETRIES));
+  bool shouldFetchWeather = locationConfigured && isDaytime && (weatherDue || (weatherRetries > 0 && weatherRetries <= WEATHER_MAX_RETRIES));
   if (shouldFetchWeather) {
     if (WiFi.status() != WL_CONNECTED) {
       connectWiFi();
@@ -784,14 +911,17 @@ void setup() {
   // Check if we woke from a button press
   esp_sleep_wakeup_cause_t wakeReason = esp_sleep_get_wakeup_cause();
   if (wakeReason == ESP_SLEEP_WAKEUP_EXT1) {
-    Serial.println("Button wake detected — entering OTA mode");
+    Serial.println("Button wake detected — entering maintenance mode");
 
     connectWiFi();
     bool wifiOk = (WiFi.status() == WL_CONNECTED);
 
-    if (wifiOk) {
-      otaMode = true;
+    // The maintenance window always opens on button press — location
+    // provisioning runs over USB serial and doesn't need WiFi. ArduinoOTA
+    // is the only part gated on a successful WiFi connect.
+    otaMode = true;
 
+    if (wifiOk) {
       ArduinoOTA.setHostname("epaper-clock");
       ArduinoOTA.onStart([]() {
         Serial.println("OTA update starting...");
@@ -803,26 +933,18 @@ void setup() {
         Serial.printf("OTA error [%u]\n", error);
       });
       ArduinoOTA.begin();
-
-      drawOtaScreen(true);
-      epaper.update();
-      otaStartedAt = millis();
     } else {
-      // No point holding the listen window open with no WiFi — go straight
-      // back to the clock so the button press doesn't just burn battery.
-      Serial.println("OTA: WiFi connect failed — skipping listen window");
-      drawOtaScreen(false);
-      epaper.update();
-      delay(3000);
-      lastVoltage = voltage;
-      drawClock(lastVoltage);
-      epaper.update();
+      Serial.println("Maintenance mode: WiFi connect failed — OTA unavailable, serial provisioning still active");
     }
+
+    drawOtaScreen(wifiOk);
+    epaper.update();
+    otaStartedAt = millis();
   } else {
     checkForFirmwareUpdate();  // may flash new firmware and reboot; does not return in that case
     lastVoltage = voltage;
     drawClock(lastVoltage);
-    epaper.update();
+    refreshClockDisplay();
   }
 
 if (!hasSleptOnce) {
@@ -833,16 +955,18 @@ if (!hasSleptOnce) {
 }
 
 void loop() {
-  // OTA mode: listen for updates, then sleep
+  // Maintenance mode: listen for OTA updates and/or serial location
+  // provisioning, then sleep
   if (otaMode) {
     ArduinoOTA.handle();
+    handleSerialProvisioning();
     unsigned long elapsed = millis() - otaStartedAt;
     if (elapsed >= OTA_LISTEN_MS) {
       Serial.println("OTA listen window expired, drawing clock and going to sleep");
       otaMode = false;
       lastVoltage = readBatteryVoltage();
       drawClock(lastVoltage);
-      epaper.update();
+      refreshClockDisplay();
       uint64_t sleepDuration = getSleepDuration();
       enterDeepSleep(sleepDuration);
     }
@@ -850,10 +974,12 @@ void loop() {
     return;
   }
 
-  // First boot: stay awake so IDE can push updates via serial
+  // First boot: stay awake so IDE can push updates via serial, and so
+  // location provisioning can happen before the first sleep
   if (!hasSleptOnce) {
+    handleSerialProvisioning();
     unsigned long elapsed = millis() - setupDoneAt;
-    
+
     if (elapsed < FIRST_BOOT_AWAKE_MS) {
       Serial.printf("... %lus until sleep", (FIRST_BOOT_AWAKE_MS - elapsed) / 1000);
       delay(5000);

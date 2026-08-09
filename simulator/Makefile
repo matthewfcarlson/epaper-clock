@@ -11,13 +11,17 @@ CXXFLAGS = -std=c++17 -Wall -Wno-unused-function -Wno-unused-variable \
 
 LDFLAGS  = $(SDL_LIBS) $(TTF_LIB)
 
-.PHONY: all clean run
+.PHONY: all clean run faces
 
 all: sim
 
+faces: experiments/faces.cpp EPaperSim.h stubs/Arduino.h stubs/TFT_eSPI.h ../src/BigDigits.h
+	$(CXX) $(CXXFLAGS) experiments/faces.cpp -o experiments/faces $(LDFLAGS)
+
 sim: main.cpp EPaperSim.h stubs/Arduino.h stubs/TFT_eSPI.h stubs/WiFi.h \
      stubs/WiFiClientSecure.h stubs/Update.h \
-     stubs/HTTPClient.h stubs/ArduinoOTA.h stubs/esp_sleep.h stubs/time_compat.h
+     stubs/HTTPClient.h stubs/ArduinoOTA.h stubs/esp_sleep.h stubs/time_compat.h \
+     stubs/Preferences.h
 	$(CXX) $(CXXFLAGS) main.cpp -o sim $(LDFLAGS)
 
 run: sim

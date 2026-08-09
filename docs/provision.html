@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XIAO ePaper Clock — Location Setup</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f4;
+    --panel: #ffffff;
+    --text: #1c1c1c;
+    --muted: #666;
+    --border: #ddd;
+    --accent: #2563eb;
+    --accent-text: #ffffff;
+    --ok: #15803d;
+    --err: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181a;
+      --panel: #232427;
+      --text: #eaeaea;
+      --muted: #9a9a9a;
+      --border: #3a3b3e;
+      --accent: #3b82f6;
+      --accent-text: #0b0b0b;
+      --ok: #4ade80;
+      --err: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  main { width: 100%; max-width: 480px; }
+  h1 { font-size: 1.25rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: 0.9rem; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .row { display: flex; gap: 8px; margin-bottom: 12px; }
+  .row > * { flex: 1; }
+  label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 4px; }
+  input[type=number] {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 15px;
+  }
+  button {
+    padding: 10px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button.primary {
+    background: var(--accent);
+    color: var(--accent-text);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .status-line { font-size: 0.85rem; color: var(--muted); margin: 0 0 12px; }
+  .status-line.ok { color: var(--ok); }
+  .status-line.err { color: var(--err); }
+  .field { margin-bottom: 12px; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .hidden { display: none; }
+  .unsupported {
+    border-radius: 12px;
+    padding: 16px;
+    background: color-mix(in srgb, var(--err) 12%, var(--panel));
+    border: 1px solid var(--err);
+    font-size: 0.9rem;
+  }
+  code {
+    background: var(--bg);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>XIAO ePaper Clock — Location Setup</h1>
+  <p class="sub">Sets the weather location over USB using the Web Serial API. Press a button on the device to enter maintenance mode, plug it in, then connect below.</p>
+
+  <div id="unsupported" class="unsupported hidden">
+    Your browser doesn't support the Web Serial API. Open this page in
+    <strong>Chrome</strong> or <strong>Edge</strong> on a desktop computer.
+  </div>
+
+  <div id="app" class="panel">
+    <p id="connState" class="status-line">Not connected.</p>
+    <div class="actions">
+      <button id="connectBtn" class="primary">Connect device</button>
+      <button id="disconnectBtn" class="hidden">Disconnect</button>
+    </div>
+  </div>
+
+  <div id="configPanel" class="panel hidden">
+    <p id="deviceInfo" class="status-line"></p>
+
+    <div class="field">
+      <div class="row">
+        <div>
+          <label for="lat">Latitude</label>
+          <input type="number" id="lat" step="0.0001" min="-90" max="90" placeholder="30.5200">
+        </div>
+        <div>
+          <label for="lon">Longitude</label>
+          <input type="number" id="lon" step="0.0001" min="-180" max="180" placeholder="-97.7200">
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="geoBtn">Use my current location</button>
+      <button id="saveBtn" class="primary">Save to device</button>
+    </div>
+
+    <p id="saveResult" class="status-line"></p>
+  </div>
+</main>
+
+<script>
+(() => {
+  const connectBtn = document.getElementById('connectBtn');
+  const disconnectBtn = document.getElementById('disconnectBtn');
+  const connState = document.getElementById('connState');
+  const configPanel = document.getElementById('configPanel');
+  const deviceInfo = document.getElementById('deviceInfo');
+  const latInput = document.getElementById('lat');
+  const lonInput = document.getElementById('lon');
+  const geoBtn = document.getElementById('geoBtn');
+  const saveBtn = document.getElementById('saveBtn');
+  const saveResult = document.getElementById('saveResult');
+
+  if (!('serial' in navigator)) {
+    document.getElementById('unsupported').classList.remove('hidden');
+    document.getElementById('app').classList.add('hidden');
+    return;
+  }
+
+  let port = null;
+  let reader = null;
+  let writer = null;
+  let readLoopPromise = null;
+  let lineBuf = '';
+  let pendingReplyResolve = null;
+
+  function setConnState(text, cls) {
+    connState.textContent = text;
+    connState.className = 'status-line' + (cls ? ' ' + cls : '');
+  }
+
+  // Reads decoded text, splits into lines, and resolves the next ">>"
+  // protocol reply (ignoring plain debug output from the same stream).
+  async function readLoop() {
+    const decoder = new TextDecoderStream();
+    const inputDone = port.readable.pipeTo(decoder.writable);
+    reader = decoder.readable.getReader();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        lineBuf += value;
+        let idx;
+        while ((idx = lineBuf.indexOf('\n')) >= 0) {
+          const line = lineBuf.slice(0, idx).replace(/\r$/, '');
+          lineBuf = lineBuf.slice(idx + 1);
+          if (line.startsWith('>>') && pendingReplyResolve) {
+            const resolve = pendingReplyResolve;
+            pendingReplyResolve = null;
+            resolve(line.slice(2));
+          }
+        }
+      }
+    } catch (e) {
+      // port closed/disconnected
+    }
+    await inputDone.catch(() => {});
+  }
+
+  function sendCommand(cmd, timeoutMs = 4000) {
+    return new Promise(async (resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingReplyResolve = null;
+        reject(new Error('Timed out waiting for device reply'));
+      }, timeoutMs);
+      pendingReplyResolve = (reply) => { clearTimeout(timer); resolve(reply); };
+      try {
+        const encoder = new TextEncoder();
+        await writer.write(encoder.encode(cmd + '\n'));
+      } catch (e) {
+        clearTimeout(timer);
+        pendingReplyResolve = null;
+        reject(e);
+      }
+    });
+  }
+
+  function parseStatus(reply) {
+    // "STATUS configured=0 lat=0.0000 lon=0.0000 fw=0.9.0"
+    const out = {};
+    reply.replace(/^STATUS\s+/, '').split(/\s+/).forEach(pair => {
+      const [k, v] = pair.split('=');
+      if (k) out[k] = v;
+    });
+    return out;
+  }
+
+  async function refreshStatus() {
+    try {
+      const reply = await sendCommand('CFG GET_STATUS');
+      const st = parseStatus(reply);
+      const configured = st.configured === '1';
+      deviceInfo.textContent = `Firmware ${st.fw || '?'} — location ` +
+        (configured ? `set (${st.lat}, ${st.lon})` : 'not set');
+      if (configured) {
+        latInput.value = st.lat;
+        lonInput.value = st.lon;
+      }
+    } catch (e) {
+      deviceInfo.textContent = 'Connected, but device did not respond — is it in maintenance mode?';
+    }
+  }
+
+  connectBtn.addEventListener('click', async () => {
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+      writer = port.writable.getWriter();
+      readLoopPromise = readLoop();
+
+      setConnState('Connected.', 'ok');
+      connectBtn.classList.add('hidden');
+      disconnectBtn.classList.remove('hidden');
+      configPanel.classList.remove('hidden');
+      await refreshStatus();
+    } catch (e) {
+      setConnState('Connection failed: ' + e.message, 'err');
+    }
+  });
+
+  disconnectBtn.addEventListener('click', async () => {
+    try {
+      if (reader) { await reader.cancel().catch(() => {}); }
+      if (writer) { writer.releaseLock(); writer = null; }
+      if (port) { await port.close().catch(() => {}); port = null; }
+    } finally {
+      setConnState('Not connected.');
+      connectBtn.classList.remove('hidden');
+      disconnectBtn.classList.add('hidden');
+      configPanel.classList.add('hidden');
+      saveResult.textContent = '';
+    }
+  });
+
+  geoBtn.addEventListener('click', () => {
+    if (!('geolocation' in navigator)) {
+      saveResult.textContent = 'Geolocation is not available in this browser.';
+      saveResult.className = 'status-line err';
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        latInput.value = pos.coords.latitude.toFixed(4);
+        lonInput.value = pos.coords.longitude.toFixed(4);
+      },
+      (err) => {
+        saveResult.textContent = 'Could not get location: ' + err.message;
+        saveResult.className = 'status-line err';
+      }
+    );
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    const lat = parseFloat(latInput.value);
+    const lon = parseFloat(lonInput.value);
+    if (Number.isNaN(lat) || Number.isNaN(lon)) {
+      saveResult.textContent = 'Enter both latitude and longitude.';
+      saveResult.className = 'status-line err';
+      return;
+    }
+    saveBtn.disabled = true;
+    saveResult.textContent = 'Saving…';
+    saveResult.className = 'status-line';
+    try {
+      const reply = await sendCommand(`CFG SET_LOCATION ${lat} ${lon}`);
+      if (reply === 'OK SET_LOCATION') {
+        saveResult.textContent = 'Saved — the device will pick it up on the next weather fetch.';
+        saveResult.className = 'status-line ok';
+        await refreshStatus();
+      } else {
+        saveResult.textContent = 'Device rejected it: ' + reply;
+        saveResult.className = 'status-line err';
+      }
+    } catch (e) {
+      saveResult.textContent = 'Error: ' + e.message;
+      saveResult.className = 'status-line err';
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>
