@@ -16,6 +16,7 @@ LDFLAGS  = $(SDL_LIBS) $(TTF_LIB)
 all: sim
 
 sim: main.cpp EPaperSim.h stubs/Arduino.h stubs/TFT_eSPI.h stubs/WiFi.h \
+     stubs/WiFiClientSecure.h stubs/Update.h \
      stubs/HTTPClient.h stubs/ArduinoOTA.h stubs/esp_sleep.h stubs/time_compat.h
 	$(CXX) $(CXXFLAGS) main.cpp -o sim $(LDFLAGS)
 

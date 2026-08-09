@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string>
+#include <vector>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -27,8 +28,10 @@ inline const GFXfont FreeSans24pt7b  = {28};
 
 // Map TFT_eSPI built-in font numbers to point sizes
 static int builtinFontPt(int fontNum) {
+    // Sizes track the real TFT_eSPI numbered-font pixel heights so the sim
+    // matches hardware (font 1 GLCD = 8px, font 2 = 16px, font 4 ~26px, font 7 = 48px).
     switch (fontNum) {
-        case 1:  return 12;
+        case 1:  return 8;
         case 2:  return 16;
         case 4:  return 24;
         case 7:  return 48;
@@ -136,7 +139,7 @@ public:
 
     // --- Text ---
     int textWidth(const char *str, int fontNum) {
-        TTF_Font *f = fontAt(builtinFontPt(fontNum));
+        TTF_Font *f = fontAt(ptForContext(fontNum));
         if (!f) return strlen(str) * 8;
         int w = 0, h = 0;
         TTF_SizeUTF8(f, str, &w, &h);
@@ -208,10 +211,23 @@ private:
     void loadFont(int pt) {
         if (fontCount_ >= MAX_FONTS) return;
         static const char *PATHS[] = {
+            // macOS
             "/System/Library/Fonts/SFNS.ttf",
             "/Library/Fonts/Arial Unicode.ttf",
             "/System/Library/Fonts/Helvetica.ttc",
+            // Linux (CI) — only the small weather/battery text uses these;
+            // the big clock digits are bitmaps from BigDigits.h.
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
         };
+        // Allow an explicit override (e.g. in CI) via the SIM_FONT env var.
+        if (const char *envFont = getenv("SIM_FONT")) {
+            if (TTF_Font *ef = TTF_OpenFont(envFont, pt)) {
+                fontCache_[fontCount_++] = {pt, ef};
+                return;
+            }
+        }
         TTF_Font *f = nullptr;
         for (auto &p : PATHS) {
             f = TTF_OpenFont(p, pt);
@@ -231,7 +247,11 @@ private:
     }
 
     int ptForContext(int fontNum) {
-        if (freeFont_) return freeFont_->pointSize * textScale_;
+        // TFT_eSPI quirk: a GFX free font is registered as "font 1", so it only
+        // takes effect when fontNum == 1. Any other numbered font ignores it.
+        // Replicating this lets the sim catch bugs where a free font set for an
+        // earlier draw bleeds into a later drawString(..., 1) call.
+        if (freeFont_ && fontNum == 1) return freeFont_->pointSize * textScale_;
         return builtinFontPt(fontNum) * textScale_;
     }
 

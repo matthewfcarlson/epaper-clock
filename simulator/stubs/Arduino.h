@@ -139,6 +139,17 @@ struct SerialClass {
 };
 inline SerialClass Serial;
 
+// --- ESP restart --- (used by the firmware auto-update path; unreachable in
+// the simulator since the GitHub release check always reports "up to date",
+// see HTTPClient.h). Reuses the same sleep-request flag main.cpp already
+// polls to end a loop() cycle and re-enter setup(), the closest analog to a
+// real device restart.
+extern bool g_sleep_requested;
+struct EspClass {
+    void restart() { g_sleep_requested = true; }
+};
+inline EspClass ESP;
+
 // --- Math helpers ---
 #ifndef min
 #define min(a,b) ((a)<(b)?(a):(b))

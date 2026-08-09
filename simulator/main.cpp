@@ -7,6 +7,8 @@
 #include "stubs/SPI.h"
 #include "stubs/TFT_eSPI.h"
 #include "stubs/WiFi.h"
+#include "stubs/WiFiClientSecure.h"
+#include "stubs/Update.h"
 #include "stubs/HTTPClient.h"
 #include "stubs/ArduinoOTA.h"
 #include "stubs/esp_sleep.h"
@@ -26,8 +28,9 @@ bool     g_sleep_requested = false;
 uint64_t g_sleep_us        = 0;
 
 // Include the sketch as a C++ translation unit.
-// Relative #includes inside the .ino resolve against the .ino's own directory (project root).
-#include "../XIAO_epaper_clock.ino"
+// Relative #includes inside main.cpp (config.h, version.h, BigDigits.h)
+// resolve against its own directory, i.e. ../src.
+#include "../src/main.cpp"
 
 int main(int argc, char **argv) {
     // Optional positional argument: output JPEG base path.

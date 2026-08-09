@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Allow pushing rendered screenshots to the ci-screenshots branch and
+# commenting on the PR.
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Compile the firmware for the XIAO ESP32S3 (Plus) with PlatformIO.
+  # ---------------------------------------------------------------------------
+  firmware:
+    name: Build firmware (ESP32S3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: pip install -U platformio
+
+      - name: Generate placeholder config.h
+        run: |
+          cat > src/config.h <<'EOF'
+          #pragma once
+          const char *WIFI_SSID = "ci-ssid";
+          const char *WIFI_PASS = "ci-pass";
+          const char *TZ_INFO = "CST6CDT,M3.2.0,M11.1.0";
+          const char *NTP_SERVER1 = "pool.ntp.org";
+          const char *NTP_SERVER2 = "time.nist.gov";
+          const char *OWM_API_KEY = "ci-key";
+          const float OWM_LAT = 30.52;
+          const float OWM_LON = -97.72;
+          const bool OTA_UPDATES_ENABLED = true;
+          const char *OTA_GITHUB_OWNER = "matthewfcarlson";
+          const char *OTA_GITHUB_REPO = "epaper-clock";
+          EOF
+
+      - name: Build firmware
+        run: pio run
+
+      - name: Upload firmware binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-seeed_xiao_esp32s3
+          path: .pio/build/seeed_xiao_esp32s3/firmware.bin
+
+  # ---------------------------------------------------------------------------
+  # Build the SDL2 simulator, render one boot cycle to JPEGs, and post them
+  # onto the pull request.
+  # ---------------------------------------------------------------------------
+  simulator:
+    name: Build simulator & render frames
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SDL2 and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libsdl2-dev libsdl2-ttf-dev fonts-dejavu-core xvfb
+
+      - name: Generate placeholder config.h
+        run: |
+          cat > ../src/config.h <<'EOF'
+          #pragma once
+          const char *WIFI_SSID = "ci-ssid";
+          const char *WIFI_PASS = "ci-pass";
+          const char *TZ_INFO = "CST6CDT,M3.2.0,M11.1.0";
+          const char *NTP_SERVER1 = "pool.ntp.org";
+          const char *NTP_SERVER2 = "time.nist.gov";
+          const char *OWM_API_KEY = "ci-key";
+          const float OWM_LAT = 30.52;
+          const float OWM_LON = -97.72;
+          const bool OTA_UPDATES_ENABLED = true;
+          const char *OTA_GITHUB_OWNER = "matthewfcarlson";
+          const char *OTA_GITHUB_REPO = "epaper-clock";
+          EOF
+        working-directory: simulator
+
+      - name: Build simulator
+        working-directory: simulator
+        run: make CXX=g++
+
+      - name: Render frames (headless via xvfb)
+        working-directory: simulator
+        run: |
+          xvfb-run -a --server-args="-screen 0 800x480x24" ./sim clock.jpg
+          ls -la clock_*.jpg
+
+      - name: Upload rendered frames
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulator-frames
+          path: simulator/clock_*.jpg
+
+      - name: Publish frames to ci-screenshots branch
+        if: github.event_name == 'pull_request'
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          DEST="pr-${{ github.event.number }}"
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          tmp="$(mktemp -d)"
+          if git clone --depth 1 --branch ci-screenshots "$REPO_URL" "$tmp" 2>/dev/null; then
+            echo "Cloned existing ci-screenshots branch"
+          else
+            echo "Creating ci-screenshots orphan branch"
+            git clone --depth 1 "$REPO_URL" "$tmp"
+            git -C "$tmp" checkout --orphan ci-screenshots
+            git -C "$tmp" rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          rm -rf "${tmp:?}/$DEST"
+          mkdir -p "$tmp/$DEST"
+          cp simulator/clock_*.jpg "$tmp/$DEST/"
+
+          git -C "$tmp" add "$DEST"
+          git -C "$tmp" commit -m "PR #${{ github.event.number }} simulator frames @ ${{ github.sha }}" \
+            || { echo "Nothing to commit"; }
+          git -C "$tmp" push origin ci-screenshots
+
+          # Build the Markdown comment body (cache-bust raw URLs with the run id).
+          base="https://raw.githubusercontent.com/${{ github.repository }}/ci-screenshots/${DEST}"
+          {
+            echo "body<<MARKDOWN"
+            echo "<!-- simulator-preview -->"
+            echo "## 🖥️ Simulator preview"
+            echo ""
+            echo "Rendered from \`${{ github.sha }}\`"
+            echo ""
+            for f in simulator/clock_*.jpg; do
+              name="$(basename "$f")"
+              echo "**$name**"
+              echo ""
+              echo "![$name](${base}/${name}?v=${{ github.run_id }})"
+              echo ""
+            done
+            echo "MARKDOWN"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Comment preview on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = process.env.COMMENT_BODY;
+            const marker = '<!-- simulator-preview -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+        env:
+          COMMENT_BODY: ${{ steps.publish.outputs.body }}
