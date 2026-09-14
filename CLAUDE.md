@@ -63,15 +63,23 @@ make clean        # remove binary
 
 **JPEG export:** passing a filename saves every `update()` call as a numbered JPEG and exits — `clock.jpg` produces `clock_01.jpg` (the "Syncing…" screen, only on first boot) and `clock_02.jpg` (the clock face). On subsequent boots NTP is already synced so only the clock frame is saved.
 
+**Forcing a time (e.g. to see night-time behavior):** set `SIM_TIME` to freeze the simulator's clock, either as `HH:MM` (today, in the device's configured `TZ_INFO`) or a raw Unix epoch:
+
+```bash
+SIM_TIME=03:30 ./sim night.jpg   # 1am-6am night window: 15-min wake cadence, weather fetch skipped, nightly GitHub check runs
+```
+
+The clock stays frozen at that instant for the run (it doesn't keep ticking) — rerun with a different value to look elsewhere. See `applySimTimeOverride()` in `simulator/main.cpp` and `g_sim_time_override` in `simulator/stubs/time_compat.h`.
+
 **How it works:** `simulator/main.cpp` `#include`s `src/main.cpp` directly as a C++ translation unit (its `config.h`/`version.h`/`BigDigits.h`/`ota_health.h` includes resolve against `src/`, since that's `main.cpp`'s own directory), and the Makefile separately compiles `src/ota_health.cpp` as its own translation unit and links it in. `simulator/stubs/` provides thin header replacements for every Arduino/ESP32 API (`Arduino.h`, `WiFi.h`, `WiFiClientSecure.h`, `Update.h`, `HTTPClient.h`, `esp_sleep.h`, `esp_system.h`, `esp_ota_ops.h`, `time_compat.h`, `TFT_eSPI.h`). `EPaperSim.h` implements the `EPaper` class using an SDL2 renderer backed by a persistent render-target texture (`SDL_TEXTUREACCESS_TARGET`) so frames are always readable for JPEG export regardless of backbuffer swap behaviour. Text is rendered via SDL_ttf using the system SFNS font. JPEG encoding uses the bundled `stb_image_write.h` (no extra dependency).
 
 The simulator is a standalone `make`-based build, independent of PlatformIO — it doesn't link against Seeed_GFX or the real ESP32 Arduino core at all, only its own stubs.
 
 Key simulator behaviors vs. real hardware:
-- WiFi is always "connected"; weather returns hardcoded fake data (`Clear sky, 88°/71°F`)
+- The weather location is pre-seeded on startup (`simulator/main.cpp` calls `saveLocationConfig()` — the same function the real serial-provisioning protocol calls — with coordinates for zip 78681/Round Rock, TX), so `locationConfigured` is `true` from boot instead of needing an interactive provisioning step. WiFi is always "connected"; weather returns hardcoded fake data (`Clear sky, 88°/71°F`) regardless of the coordinates used
 - The GitHub release check always returns a fake old tag (`v0.0.0`), so the auto-update path is exercised for compilation but never actually fires or flashes anything
 - `esp_ota_mark_app_valid_cancel_rollback()` / `esp_ota_mark_app_invalid_rollback_and_reboot()` are stubbed no-ops (the latter just ends the current `setup()`/`loop()` cycle like a real reboot would) — there's no dual-partition flash to actually roll back
-- Time uses the Mac's real system clock (same timezone logic as the device)
+- Time uses the Mac's real system clock (same timezone logic as the device) unless overridden via `SIM_TIME` — see "Forcing a time" above
 - `esp_deep_sleep_start()` signals the main loop to pause (capped at 5 s), then reboots the cycle by calling `setup()` again — `RTC_DATA_ATTR` globals persist as they would across real deep sleep
 - `FIRST_BOOT_AWAKE_MS` and `PROVISION_LISTEN_MS` are overridden to 0 so the 60 s / 90 s wait periods are skipped
 - `Preferences` (location config storage, and `OtaHealth`'s pending-update tracking) is stubbed as an in-memory map — it persists for the life of one `./sim` run like the `RTC_DATA_ATTR` globals do, but isn't disk-backed, so it doesn't survive across separate `./sim` invocations the way real NVS survives power loss. `Serial.available()`/`read()` are stubbed to report "no input," so the location-provisioning serial protocol compiles but is never exercised interactively in the simulator.
