@@ -35,6 +35,33 @@ public:
         return it == store().end() ? def : strtof(it->second.c_str(), nullptr);
     }
 
+    bool putString(const char *key, const String &v) { return putString(key, v.c_str()); }
+    bool putString(const char *key, const char *v) {
+        if (readOnly_) return false;
+        store()[ns_ + "/" + key] = v ? v : "";
+        return true;
+    }
+    String getString(const char *key, const char *def = "") const {
+        auto it = store().find(ns_ + "/" + key);
+        return it == store().end() ? String(def) : String(it->second.c_str());
+    }
+
+    bool putUInt(const char *key, uint32_t v) {
+        if (readOnly_) return false;
+        store()[ns_ + "/" + key] = std::to_string(v);
+        return true;
+    }
+    uint32_t getUInt(const char *key, uint32_t def) const {
+        auto it = store().find(ns_ + "/" + key);
+        return it == store().end() ? def : (uint32_t)strtoul(it->second.c_str(), nullptr, 10);
+    }
+
+    bool remove(const char *key) {
+        if (readOnly_) return false;
+        store().erase(ns_ + "/" + key);
+        return true;
+    }
+
 private:
     static std::map<std::string, std::string> &store() {
         static std::map<std::string, std::string> s;

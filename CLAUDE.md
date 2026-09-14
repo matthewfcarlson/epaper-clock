@@ -17,9 +17,6 @@ pio run
 # Upload via USB
 pio run -t upload
 
-# Upload via OTA (after triggering OTA mode with a button press)
-pio run -t upload --upload-port epaper-clock.local
-
 # Serial monitor
 pio device monitor
 ```
@@ -66,17 +63,18 @@ make clean        # remove binary
 
 **JPEG export:** passing a filename saves every `update()` call as a numbered JPEG and exits — `clock.jpg` produces `clock_01.jpg` (the "Syncing…" screen, only on first boot) and `clock_02.jpg` (the clock face). On subsequent boots NTP is already synced so only the clock frame is saved.
 
-**How it works:** `simulator/main.cpp` `#include`s `src/main.cpp` directly as a C++ translation unit (its `config.h`/`version.h`/`BigDigits.h` includes resolve against `src/`, since that's `main.cpp`'s own directory). `simulator/stubs/` provides thin header replacements for every Arduino/ESP32 API (`Arduino.h`, `WiFi.h`, `WiFiClientSecure.h`, `Update.h`, `HTTPClient.h`, `ArduinoOTA.h`, `esp_sleep.h`, `time_compat.h`, `TFT_eSPI.h`). `EPaperSim.h` implements the `EPaper` class using an SDL2 renderer backed by a persistent render-target texture (`SDL_TEXTUREACCESS_TARGET`) so frames are always readable for JPEG export regardless of backbuffer swap behaviour. Text is rendered via SDL_ttf using the system SFNS font. JPEG encoding uses the bundled `stb_image_write.h` (no extra dependency).
+**How it works:** `simulator/main.cpp` `#include`s `src/main.cpp` directly as a C++ translation unit (its `config.h`/`version.h`/`BigDigits.h`/`ota_health.h` includes resolve against `src/`, since that's `main.cpp`'s own directory), and the Makefile separately compiles `src/ota_health.cpp` as its own translation unit and links it in. `simulator/stubs/` provides thin header replacements for every Arduino/ESP32 API (`Arduino.h`, `WiFi.h`, `WiFiClientSecure.h`, `Update.h`, `HTTPClient.h`, `esp_sleep.h`, `esp_system.h`, `esp_ota_ops.h`, `time_compat.h`, `TFT_eSPI.h`). `EPaperSim.h` implements the `EPaper` class using an SDL2 renderer backed by a persistent render-target texture (`SDL_TEXTUREACCESS_TARGET`) so frames are always readable for JPEG export regardless of backbuffer swap behaviour. Text is rendered via SDL_ttf using the system SFNS font. JPEG encoding uses the bundled `stb_image_write.h` (no extra dependency).
 
 The simulator is a standalone `make`-based build, independent of PlatformIO — it doesn't link against Seeed_GFX or the real ESP32 Arduino core at all, only its own stubs.
 
 Key simulator behaviors vs. real hardware:
 - WiFi is always "connected"; weather returns hardcoded fake data (`Clear sky, 88°/71°F`)
 - The GitHub release check always returns a fake old tag (`v0.0.0`), so the auto-update path is exercised for compilation but never actually fires or flashes anything
+- `esp_ota_mark_app_valid_cancel_rollback()` / `esp_ota_mark_app_invalid_rollback_and_reboot()` are stubbed no-ops (the latter just ends the current `setup()`/`loop()` cycle like a real reboot would) — there's no dual-partition flash to actually roll back
 - Time uses the Mac's real system clock (same timezone logic as the device)
 - `esp_deep_sleep_start()` signals the main loop to pause (capped at 5 s), then reboots the cycle by calling `setup()` again — `RTC_DATA_ATTR` globals persist as they would across real deep sleep
-- `FIRST_BOOT_AWAKE_MS` and `OTA_LISTEN_MS` are overridden to 0 so the 60 s / 90 s wait periods are skipped
-- `Preferences` (location config storage) is stubbed as an in-memory map — it persists for the life of one `./sim` run like the `RTC_DATA_ATTR` globals do, but isn't disk-backed, so it doesn't survive across separate `./sim` invocations the way real NVS survives power loss. `Serial.available()`/`read()` are stubbed to report "no input," so the location-provisioning serial protocol compiles but is never exercised interactively in the simulator.
+- `FIRST_BOOT_AWAKE_MS` and `PROVISION_LISTEN_MS` are overridden to 0 so the 60 s / 90 s wait periods are skipped
+- `Preferences` (location config storage, and `OtaHealth`'s pending-update tracking) is stubbed as an in-memory map — it persists for the life of one `./sim` run like the `RTC_DATA_ATTR` globals do, but isn't disk-backed, so it doesn't survive across separate `./sim` invocations the way real NVS survives power loss. `Serial.available()`/`read()` are stubbed to report "no input," so the location-provisioning serial protocol compiles but is never exercised interactively in the simulator.
 
 ## Architecture
 
@@ -89,6 +87,7 @@ Key simulator behaviors vs. real hardware:
 | `src/config.h` | User secrets & settings (gitignored — create locally) |
 | `src/version.h` | `FIRMWARE_VERSION` — bump and tag a matching GitHub release to ship an update |
 | `src/BigDigits.h` | PROGMEM bitmap data for large digits 0–9 plus `bigDigitsWidth()` / `drawBigDigits()` helpers |
+| `src/ota_health.h` / `src/ota_health.cpp` | `OtaHealth` — bootloader-rollback safety net for the GitHub-releases update path (see "Firmware auto-update" below) |
 
 ### Deep sleep & wake cycle
 
@@ -99,7 +98,7 @@ All state that must survive a deep sleep cycle is declared `RTC_DATA_ATTR`. On e
 4. Draws the clock and calls `epaper.update()`
 5. Sleeps until the next 5-minute boundary (day) or next 15-minute boundary (night, 1–6am). The displayed time is always rounded to the nearest 5-minute mark, matching this cadence.
 
-Button press (any of D1/D2/D4) wakes via `ext1` and triggers a maintenance window: the device connects to WiFi, and if that succeeds starts `ArduinoOTA`; either way it draws a maintenance screen (showing the listen countdown, hostname/IP if connected, and running firmware version) and listens for 90 seconds — over WiFi for OTA, and over the USB serial connection for location provisioning (see below) — before falling back to normal clock+sleep. Unlike OTA, serial provisioning doesn't need WiFi, so the window stays open even if WiFi failed to connect.
+Button press (any of D1/D2/D4) wakes via `ext1` and triggers a maintenance window: the device draws a maintenance screen (showing the listen countdown and running firmware version) and listens on the USB serial connection for 90 seconds for location provisioning (see below) before falling back to normal clock+sleep. This window is serial-only and never touches WiFi — firmware updates are pulled from GitHub on the normal nightly schedule (see "Firmware auto-update" below), not triggered by button press.
 
 First boot stays awake for 60 seconds so the serial monitor (`pio device monitor`) / OTA / location provisioning can connect before the first sleep.
 
@@ -109,7 +108,7 @@ On normal (non-button) wakes during the night window (1am-6am), and at most once
 
 To ship an update: bump `FIRMWARE_VERSION` in `src/version.h`, commit, then `git tag v1.0.1 && git push origin v1.0.1`. `.github/workflows/release-firmware.yml` builds and publishes the release automatically — it rejects the push if the tag doesn't match `FIRMWARE_VERSION`. That workflow assembles `src/config.h` from repo secrets (`WIFI_SSID`, `WIFI_PASS`, `TZ_INFO`, `OWM_API_KEY`) rather than the CI job's placeholder values, since this `.bin` is what devices actually self-flash — building it with fake WiFi credentials would strand every device that updates. Set those secrets once via the repo's Settings → Secrets and variables → Actions (or `gh secret set NAME`).
 
-Caveat: there's no automatic rollback if a released build boot-loops — that needs the ESP-IDF bootloader's rollback feature enabled via a custom `sdkconfig`, which this project doesn't set up, so a bad release stays flashed (recoverable via USB or a fixed follow-up release) rather than self-healing like `ArduinoOTA`'s partition-swap would with proper rollback support. Set `OTA_UPDATES_ENABLED = false` in `src/config.h` to disable the check entirely.
+Rollback safety net: `src/ota_health.h`/`.cpp` (`OtaHealth`) guards against a bad release. The ESP-IDF bootloader's app-rollback feature and this board's default two-OTA-slot partition table are already enabled by the stock Arduino-ESP32 core for esp32s3, so no custom `sdkconfig` is needed. `checkForFirmwareUpdate()` calls `otaHealth.recordOtaAttempt()` right before rebooting into a freshly-flashed build; `setup()` calls `otaHealth.checkBootHealth()` as early as possible on every boot and `otaHealth.confirmHealthy()` once a wake cycle completes without crashing. Two layers of protection result: a boot-time crash/panic on the new partition is rolled back automatically by the bootloader before any app code runs, and firmware that boots but never manages to complete a wake cycle (e.g. a WiFi regression) is force-rolled-back by `OtaHealth` itself after `OTA_MAX_UNCONFIRMED_BOOT_ATTEMPTS` (3) unconfirmed boots. Either way the device reverts to the last-known-good build rather than staying stuck on a bad release. Set `OTA_UPDATES_ENABLED = false` in `src/config.h` to disable the check entirely.
 
 ### Location provisioning (weather lat/lon)
 

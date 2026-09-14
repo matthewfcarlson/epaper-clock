@@ -13,13 +13,13 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
-#include <ArduinoOTA.h>
 #include <Update.h>
 #include <Preferences.h>
 #include <time.h>
 #include "config.h"
 #include "version.h"
 #include "BigDigits.h"
+#include "ota_health.h"
 
 // Wake/update interval, in minutes, aligned to the clock (e.g. :00/:05/:10... for 5)
 #define DAY_WAKE_INTERVAL_MIN 5
@@ -51,9 +51,9 @@ const float CALIBRATION_FACTOR = 0.968;
 #define FIRST_BOOT_AWAKE_MS 120000
 #endif
 
-// How long to listen for OTA after button wake (90 seconds)
-#ifndef OTA_LISTEN_MS
-#define OTA_LISTEN_MS 90000
+// How long to listen for serial location provisioning after button wake (90 seconds)
+#ifndef PROVISION_LISTEN_MS
+#define PROVISION_LISTEN_MS 90000
 #endif
 
 // Weather update interval in seconds (6 hours)
@@ -104,8 +104,10 @@ RTC_DATA_ATTR uint16_t partialRefreshCount = 0;
 
 float lastVoltage = 0;
 unsigned long setupDoneAt = 0;
-bool otaMode = false;
-unsigned long otaStartedAt = 0;
+bool maintenanceMode = false;
+unsigned long maintenanceStartedAt = 0;
+
+OtaHealth otaHealth;
 
 // User-provisioned weather location (see "Location provisioning" in
 // CLAUDE.md), persisted in NVS via Preferences rather than RTC_DATA_ATTR —
@@ -260,10 +262,10 @@ void drawBatteryIcon(int x, int y, int percent) {
 }
 
 // Draw the maintenance-mode listening screen — download arrow icon + text.
-// wifiConnected controls whether we show OTA connection info (hostname/IP)
-// or a "WiFi failed" note; either way, USB serial provisioning is available
-// for the full listen window regardless of WiFi state.
-void drawOtaScreen(bool wifiConnected) {
+// Maintenance mode is serial-only (location provisioning over USB); firmware
+// updates are pulled from GitHub on the normal nightly schedule instead, so
+// this screen doesn't touch WiFi at all.
+void drawMaintenanceScreen() {
   epaper.fillScreen(TFT_WHITE);
   epaper.setTextColor(TFT_BLACK, TFT_WHITE);
 
@@ -281,18 +283,12 @@ void drawOtaScreen(bool wifiConnected) {
   epaper.drawCentreString("Maintenance Mode", cx, cy + 70, 4);
 
   char lineBuf[48];
-  snprintf(lineBuf, sizeof(lineBuf), "Listening for %lus...", (unsigned long)(OTA_LISTEN_MS / 1000));
+  snprintf(lineBuf, sizeof(lineBuf), "Listening for %lus...", (unsigned long)(PROVISION_LISTEN_MS / 1000));
   epaper.drawCentreString(lineBuf, cx, cy + 100, 2);
-  if (wifiConnected) {
-    snprintf(lineBuf, sizeof(lineBuf), "OTA: epaper-clock.local  %s", WiFi.localIP().toString().c_str());
-  } else {
-    snprintf(lineBuf, sizeof(lineBuf), "OTA unavailable (WiFi failed)");
-  }
-  epaper.drawCentreString(lineBuf, cx, cy + 130, 2);
-  epaper.drawCentreString("Connect USB + open provision.html to set location", cx, cy + 155, 2);
+  epaper.drawCentreString("Connect USB + open provision.html to set location", cx, cy + 130, 2);
 
   snprintf(lineBuf, sizeof(lineBuf), "fw %s", FIRMWARE_VERSION);
-  epaper.drawCentreString(lineBuf, cx, cy + 185, 2);
+  epaper.drawCentreString(lineBuf, cx, cy + 160, 2);
 }
 
 // Draw "installing firmware update" screen shown during a nightly auto-update
@@ -699,14 +695,11 @@ bool downloadAndFlashFirmware(const String &url) {
 }
 
 // Checks GitHub for a newer release at most once per OTA_CHECK_INTERVAL_S,
-// only during the night window, and only on normal (non-button) wakes so it
-// never runs alongside an interactive ArduinoOTA session. On success this
-// flashes the new firmware and reboots into it; it does not return in that case.
-//
-// Note: unlike a full ESP-IDF rollback setup, there's no automatic revert if
-// the new firmware boot-loops — Arduino IDE's default board config doesn't
-// enable the bootloader's rollback feature. A bad release stays flashed until
-// a fixed one is published.
+// only during the night window, and only on normal (non-button) wakes. On
+// success this flashes the new firmware and reboots into it; it does not
+// return in that case. otaHealth (see ota_health.h) tracks the pending
+// version across the reboot and rolls back automatically if it never
+// manages to confirm itself healthy.
 void checkForFirmwareUpdate() {
   if (!OTA_UPDATES_ENABLED) return;
 
@@ -748,6 +741,7 @@ void checkForFirmwareUpdate() {
   if (downloadAndFlashFirmware(assetUrl)) {
     otaFailCount = 0;
     otaFailedVersion[0] = '\0';
+    otaHealth.recordOtaAttempt(FIRMWARE_VERSION, tag);
     Serial.println("Update installed — restarting");
     Serial.flush();
     delay(200);
@@ -804,6 +798,11 @@ float readBatteryVoltage() {
 
 void setup() {
   Serial.begin(115200);
+
+  // As early as possible, before anything else has a chance to crash — see
+  // ota_health.h for what this detects/enforces.
+  otaHealth.begin();
+  otaHealth.checkBootHealth();
 
   loadLocationConfig();
 
@@ -911,35 +910,15 @@ void setup() {
   // Check if we woke from a button press
   esp_sleep_wakeup_cause_t wakeReason = esp_sleep_get_wakeup_cause();
   if (wakeReason == ESP_SLEEP_WAKEUP_EXT1) {
-    Serial.println("Button wake detected — entering maintenance mode");
+    Serial.println("Button wake detected — entering maintenance mode (serial provisioning)");
 
-    connectWiFi();
-    bool wifiOk = (WiFi.status() == WL_CONNECTED);
-
-    // The maintenance window always opens on button press — location
-    // provisioning runs over USB serial and doesn't need WiFi. ArduinoOTA
-    // is the only part gated on a successful WiFi connect.
-    otaMode = true;
-
-    if (wifiOk) {
-      ArduinoOTA.setHostname("epaper-clock");
-      ArduinoOTA.onStart([]() {
-        Serial.println("OTA update starting...");
-      });
-      ArduinoOTA.onEnd([]() {
-        Serial.println("OTA update complete!");
-      });
-      ArduinoOTA.onError([](ota_error_t error) {
-        Serial.printf("OTA error [%u]\n", error);
-      });
-      ArduinoOTA.begin();
-    } else {
-      Serial.println("Maintenance mode: WiFi connect failed — OTA unavailable, serial provisioning still active");
-    }
-
-    drawOtaScreen(wifiOk);
+    // Maintenance mode is serial-only now — location provisioning runs over
+    // USB and doesn't need WiFi. Firmware updates come from the nightly
+    // GitHub-releases check (checkForFirmwareUpdate()), not from here.
+    maintenanceMode = true;
+    drawMaintenanceScreen();
     epaper.update();
-    otaStartedAt = millis();
+    maintenanceStartedAt = millis();
   } else {
     checkForFirmwareUpdate();  // may flash new firmware and reboot; does not return in that case
     lastVoltage = voltage;
@@ -947,23 +926,25 @@ void setup() {
     refreshClockDisplay();
   }
 
-if (!hasSleptOnce) {
-  Serial.printf("First boot\n");
-}
+  // Reaching here means this wake cycle ran to completion without crashing
+  // or hanging — good enough proof to cancel any pending OTA rollback watch.
+  otaHealth.confirmHealthy();
+
+  if (!hasSleptOnce) {
+    Serial.printf("First boot — firmware %s\n", FIRMWARE_VERSION);
+  }
   setupDoneAt = millis();
 #endif
 }
 
 void loop() {
-  // Maintenance mode: listen for OTA updates and/or serial location
-  // provisioning, then sleep
-  if (otaMode) {
-    ArduinoOTA.handle();
+  // Maintenance mode: listen for serial location provisioning, then sleep
+  if (maintenanceMode) {
     handleSerialProvisioning();
-    unsigned long elapsed = millis() - otaStartedAt;
-    if (elapsed >= OTA_LISTEN_MS) {
-      Serial.println("OTA listen window expired, drawing clock and going to sleep");
-      otaMode = false;
+    unsigned long elapsed = millis() - maintenanceStartedAt;
+    if (elapsed >= PROVISION_LISTEN_MS) {
+      Serial.println("Maintenance listen window expired, drawing clock and going to sleep");
+      maintenanceMode = false;
       lastVoltage = readBatteryVoltage();
       drawClock(lastVoltage);
       refreshClockDisplay();

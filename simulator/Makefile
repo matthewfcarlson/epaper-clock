@@ -18,11 +18,11 @@ all: sim
 faces: experiments/faces.cpp EPaperSim.h stubs/Arduino.h stubs/TFT_eSPI.h ../src/BigDigits.h
 	$(CXX) $(CXXFLAGS) experiments/faces.cpp -o experiments/faces $(LDFLAGS)
 
-sim: main.cpp EPaperSim.h stubs/Arduino.h stubs/TFT_eSPI.h stubs/WiFi.h \
+sim: main.cpp ../src/ota_health.cpp ../src/ota_health.h EPaperSim.h stubs/Arduino.h stubs/TFT_eSPI.h stubs/WiFi.h \
      stubs/WiFiClientSecure.h stubs/Update.h \
-     stubs/HTTPClient.h stubs/ArduinoOTA.h stubs/esp_sleep.h stubs/time_compat.h \
+     stubs/HTTPClient.h stubs/esp_sleep.h stubs/esp_system.h stubs/esp_ota_ops.h stubs/time_compat.h \
      stubs/Preferences.h
-	$(CXX) $(CXXFLAGS) main.cpp -o sim $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) main.cpp ../src/ota_health.cpp -o sim $(LDFLAGS)
 
 run: sim
 	./sim

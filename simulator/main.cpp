@@ -10,19 +10,20 @@
 #include "stubs/WiFiClientSecure.h"
 #include "stubs/Update.h"
 #include "stubs/HTTPClient.h"
-#include "stubs/ArduinoOTA.h"
 #include "stubs/esp_sleep.h"
+#include "stubs/esp_system.h"
+#include "stubs/esp_ota_ops.h"
 #include "stubs/time_compat.h"
 #include "stubs/Preferences.h"
 
 // Enable the display code path (same flag the sketch uses to guard display functions)
 #define EPAPER_ENABLE
 
-// Skip the 60-second first-boot IDE grace period and the OTA listen window
+// Skip the 60-second first-boot IDE grace period and the maintenance listen window
 #undef  FIRST_BOOT_AWAKE_MS
 #define FIRST_BOOT_AWAKE_MS 0
-#undef  OTA_LISTEN_MS
-#define OTA_LISTEN_MS 0
+#undef  PROVISION_LISTEN_MS
+#define PROVISION_LISTEN_MS 0
 
 // Globals declared extern in esp_sleep.h
 bool     g_sleep_requested = false;
