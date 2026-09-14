@@ -66,7 +66,7 @@ make clean        # remove binary
 **Forcing a time (e.g. to see night-time behavior):** set `SIM_TIME` to freeze the simulator's clock, either as `HH:MM` (today, in the device's configured `TZ_INFO`) or a raw Unix epoch:
 
 ```bash
-SIM_TIME=03:30 ./sim night.jpg   # 1am-6am night window: 15-min wake cadence, weather fetch skipped, nightly GitHub check runs
+SIM_TIME=03:30 ./sim night.jpg   # 11pm-6am night window: 15-min wake cadence, weather fetch skipped, nightly GitHub check runs
 ```
 
 The clock stays frozen at that instant for the run (it doesn't keep ticking) — rerun with a different value to look elsewhere. See `applySimTimeOverride()` in `simulator/main.cpp` and `g_sim_time_override` in `simulator/stubs/time_compat.h`.
@@ -104,7 +104,7 @@ All state that must survive a deep sleep cycle is declared `RTC_DATA_ATTR`. On e
 2. Checks if NTP re-sync is due (every 6 hours) — shows "Syncing…" screen if so
 3. Checks if weather re-fetch is due (every 6 hours, daytime only)
 4. Draws the clock and calls `epaper.update()`
-5. Sleeps until the next 5-minute boundary (day) or next 15-minute boundary (night, 1–6am). The displayed time is always rounded to the nearest 5-minute mark, matching this cadence.
+5. Sleeps until the next 5-minute boundary (day) or next 15-minute boundary (night, 11pm–6am). The displayed time is always rounded to the nearest 5-minute mark, matching this cadence.
 
 Button press (any of D1/D2/D4) wakes via `ext1` and triggers a maintenance window: the device draws a maintenance screen (showing the listen countdown and running firmware version) and listens on the USB serial connection for 90 seconds for location provisioning (see below) before falling back to normal clock+sleep. This window is serial-only and never touches WiFi — firmware updates are pulled from GitHub on the normal nightly schedule (see "Firmware auto-update" below), not triggered by button press.
 
@@ -112,7 +112,7 @@ First boot stays awake for 60 seconds so the serial monitor (`pio device monitor
 
 ### Firmware auto-update (GitHub Releases)
 
-On normal (non-button) wakes during the night window (1am-6am), and at most once every 24 hours, the device checks `https://api.github.com/repos/{OTA_GITHUB_OWNER}/{OTA_GITHUB_REPO}/releases/latest`. If the release's tag is a newer semver than `version.h`'s `FIRMWARE_VERSION`, it downloads the first `.bin` asset attached to that release, flashes it via `Update.h`, and reboots. A release with no `.bin` asset is ignored. A failed download/flash is retried on the next nightly check, up to `OTA_MAX_UPDATE_ATTEMPTS`, before that version is skipped until a newer tag appears.
+On normal (non-button) wakes during the night window (11pm-6am), and at most once every 24 hours, the device checks `https://api.github.com/repos/{OTA_GITHUB_OWNER}/{OTA_GITHUB_REPO}/releases/latest`. If the release's tag is a newer semver than `version.h`'s `FIRMWARE_VERSION`, it downloads the first `.bin` asset attached to that release, flashes it via `Update.h`, and reboots. A release with no `.bin` asset is ignored. A failed download/flash is retried on the next nightly check, up to `OTA_MAX_UPDATE_ATTEMPTS`, before that version is skipped until a newer tag appears.
 
 To ship an update: bump `FIRMWARE_VERSION` in `src/version.h`, commit, then `git tag v1.0.1 && git push origin v1.0.1`. `.github/workflows/release-firmware.yml` builds and publishes the release automatically — it rejects the push if the tag doesn't match `FIRMWARE_VERSION`. That workflow assembles `src/config.h` from repo secrets (`WIFI_SSID`, `WIFI_PASS`, `TZ_INFO`, `OWM_API_KEY`) rather than the CI job's placeholder values, since this `.bin` is what devices actually self-flash — building it with fake WiFi credentials would strand every device that updates. Set those secrets once via the repo's Settings → Secrets and variables → Actions (or `gh secret set NAME`).
 

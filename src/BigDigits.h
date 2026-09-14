@@ -3192,7 +3192,7 @@ static const BigGlyph bigDigits[10] = {
   { 33997, 140, 220, 157,    8, -215 },  // '9'
 };
 
-static void drawBigDigit(EPaper &display, int x, int baseline, char c) {
+static void drawBigDigit(EPaper &display, int x, int baseline, char c, uint32_t color = TFT_BLACK) {
   if (c < '0' || c > '9') return;
   const BigGlyph &g = bigDigits[c - '0'];
   uint32_t bo = g.bitmapOffset;
@@ -3203,18 +3203,18 @@ static void drawBigDigit(EPaper &display, int x, int baseline, char c) {
         bits = pgm_read_byte(&bigDigitBitmaps[bo++]);
       }
       if (bits & 0x80) {
-        display.drawPixel(x + g.xOffset + xx, baseline + g.yOffset + yy, TFT_BLACK);
+        display.drawPixel(x + g.xOffset + xx, baseline + g.yOffset + yy, color);
       }
       bits <<= 1;
     }
   }
 }
 
-static int drawBigDigits(EPaper &display, int x, int baseline, const char *str) {
+static int drawBigDigits(EPaper &display, int x, int baseline, const char *str, uint32_t color = TFT_BLACK) {
   int cursorX = x;
   while (*str) {
     if (*str >= '0' && *str <= '9') {
-      drawBigDigit(display, cursorX, baseline, *str);
+      drawBigDigit(display, cursorX, baseline, *str, color);
       cursorX += bigDigits[*str - '0'].xAdvance;
     }
     str++;

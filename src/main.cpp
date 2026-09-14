@@ -24,7 +24,7 @@
 // Wake/update interval, in minutes, aligned to the clock (e.g. :00/:05/:10... for 5)
 #define DAY_WAKE_INTERVAL_MIN 5
 #define NIGHT_WAKE_INTERVAL_MIN 15
-#define NIGHT_START_HOUR 1
+#define NIGHT_START_HOUR 23
 #define NIGHT_END_HOUR 6
 // Fallback sleep duration if the current time isn't available (e.g. NTP never synced)
 #define SLEEP_FALLBACK_US ((uint64_t)DAY_WAKE_INTERVAL_MIN * 60ULL * 1000000ULL)
@@ -101,6 +101,15 @@ RTC_DATA_ATTR uint8_t wifiBssid[6] = {0, 0, 0, 0, 0, 0};
 RTC_DATA_ATTR bool wifiBssidValid = false;
 // Wakes since the last full (ghost-clearing) e-paper refresh
 RTC_DATA_ATTR uint16_t partialRefreshCount = 0;
+
+// Night window can wrap past midnight (e.g. 23 -> 6), so this can't be a
+// simple range comparison.
+bool isNightHour(int h) {
+  if (NIGHT_START_HOUR <= NIGHT_END_HOUR) {
+    return h >= NIGHT_START_HOUR && h < NIGHT_END_HOUR;
+  }
+  return h >= NIGHT_START_HOUR || h < NIGHT_END_HOUR;
+}
 
 float lastVoltage = 0;
 unsigned long setupDoneAt = 0;
@@ -418,6 +427,124 @@ void drawClock(float batteryVoltage) {
   }
 }
 
+// Draws one word letter-spaced (tracked-out, all-caps look) starting at x,
+// returning the x position immediately after the last letter.
+int drawTrackedText(const char *str, int x, int y, int fontNum, int letterSpacing) {
+  char glyph[2] = {0, 0};
+  for (const char *p = str; *p; p++) {
+    glyph[0] = *p;
+    epaper.drawString(glyph, x, y, fontNum);
+    x += epaper.textWidth(glyph, fontNum) + letterSpacing;
+  }
+  return (*str) ? x - letterSpacing : x;
+}
+
+int trackedTextWidth(const char *str, int fontNum, int letterSpacing) {
+  char glyph[2] = {0, 0};
+  int w = 0;
+  for (const char *p = str; *p; p++) {
+    glyph[0] = *p;
+    w += epaper.textWidth(glyph, fontNum) + letterSpacing;
+  }
+  return (*str) ? w - letterSpacing : w;
+}
+
+// Draws "WEEKDAY · AM" (or PM), tracked-out and centered on cx, with a small
+// dot separator — the caption under the night clock face.
+void drawNightCaption(int cx, int y, const char *weekdayUpper, const char *ampm) {
+  epaper.setFreeFont(&FreeSans12pt7b);
+  epaper.setTextSize(1);
+  epaper.setTextColor(TFT_WHITE, TFT_BLACK);
+
+  const int letterSpacing = 6;
+  const int gap = 20;
+  const int dotR = 3;
+
+  int weekdayW = trackedTextWidth(weekdayUpper, 1, letterSpacing);
+  int ampmW = trackedTextWidth(ampm, 1, letterSpacing);
+  int totalW = weekdayW + gap + dotR * 2 + gap + ampmW;
+
+  int x = cx - totalW / 2;
+  x = drawTrackedText(weekdayUpper, x, y, 1, letterSpacing);
+  x += gap;
+  epaper.fillCircle(x + dotR, y + 10, dotR, TFT_WHITE);
+  x += dotR * 2 + gap;
+  drawTrackedText(ampm, x, y, 1, letterSpacing);
+}
+
+// Night-only rendering: dark background, white text, no date/weather/battery
+// — a separate function from drawClock() so day-mode drawing (due for its
+// own refactor) is untouched.
+void drawNightClock() {
+  struct tm timeinfo;
+  int hour = 0, min = 0, wday = 0;
+  bool haveTime = getLocalTime(&timeinfo, 100);
+  if (haveTime) {
+    hour = timeinfo.tm_hour;
+    min = timeinfo.tm_min;
+    wday = timeinfo.tm_wday;
+  }
+
+  // Round the displayed time to the nearest 5-minute mark, matching the
+  // cadence the device actually wakes/updates at.
+  min = ((min + 2) / 5) * 5;
+  if (min >= 60) {
+    min = 0;
+    hour = (hour + 1) % 24;
+  }
+
+  epaper.fillScreen(TFT_BLACK);
+  epaper.setTextColor(TFT_WHITE, TFT_BLACK);
+
+  const char *ampm = (hour < 12) ? "AM" : "PM";
+  int hour12 = hour % 12;
+  if (hour12 == 0) hour12 = 12;
+
+  char hourStr[3];
+  char minStr[3];
+  sprintf(hourStr, "%d", hour12);
+  sprintf(minStr, "%02d", min);
+
+  int hourW = bigDigitsWidth(hourStr);
+  int colonW = 50;
+  int minW = bigDigitsWidth(minStr);
+  int totalW = hourW + colonW + minW;
+  int xStart = (SCREEN_W - totalW) / 2;
+  int yPos = SCREEN_H / 2 + 60;  // baseline position
+
+  drawBigDigits(epaper, xStart, yPos, hourStr, TFT_WHITE);
+
+  // Colon as two filled circles, centered on digit height
+  int colonX = xStart + hourW + colonW / 2;
+  int dotR = 14;
+  int colonCenter = yPos - 105;
+  int dotSpacing = 45;
+  epaper.fillCircle(colonX, colonCenter - dotSpacing, dotR, TFT_WHITE);
+  epaper.fillCircle(colonX, colonCenter + dotSpacing, dotR, TFT_WHITE);
+
+  drawBigDigits(epaper, xStart + hourW + colonW, yPos, minStr, TFT_WHITE);
+
+  static const char *weekdayNames[7] = {
+    "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"
+  };
+  drawNightCaption(SCREEN_W / 2, yPos + 45, haveTime ? weekdayNames[wday] : "", ampm);
+}
+
+// Picks day or night rendering based on the current time and draws the
+// clock face accordingly.
+void drawClockForCurrentTime(float batteryVoltage) {
+  struct tm now;
+  bool isNight = false;
+  if (getLocalTime(&now, 100)) {
+    isNight = isNightHour(now.tm_hour);
+  }
+  if (isNight) {
+    drawNightClock();
+  } else {
+    drawClock(batteryVoltage);
+  }
+}
+
 // Pushes the drawn clock face to the panel. Most wakes use a partial refresh
 // (faster, lower current, no full-panel flash); periodically forces a full
 // refresh since partial refreshes alone accumulate visible ghosting.
@@ -443,7 +570,7 @@ uint64_t getSleepDuration() {
     int secsToNextMin = 60 - s;
     if (secsToNextMin <= 0) secsToNextMin = 60;
 
-    bool isNight = (h >= NIGHT_START_HOUR) && (h < NIGHT_END_HOUR);
+    bool isNight = isNightHour(h);
     int intervalMins = isNight ? NIGHT_WAKE_INTERVAL_MIN : DAY_WAKE_INTERVAL_MIN;
 
     // Align wake to the next interval-minute mark (e.g. :00/:05/:10... for 5 min)
@@ -705,7 +832,7 @@ void checkForFirmwareUpdate() {
 
   struct tm nowTm;
   if (!getLocalTime(&nowTm, 100)) return;
-  bool isNight = (nowTm.tm_hour >= NIGHT_START_HOUR) && (nowTm.tm_hour < NIGHT_END_HOUR);
+  bool isNight = isNightHour(nowTm.tm_hour);
   if (!isNight) return;
 
   time_t nowEpoch = time(nullptr);
@@ -880,12 +1007,12 @@ void setup() {
     }
   }
 
-  // Fetch weather every ~3 hours during daytime (not 1am-6am)
+  // Fetch weather every ~3 hours during daytime (not 11pm-6am)
   // Always update lastWeatherSyncTime on attempt to avoid hammering API on failure
   struct tm now;
   bool isDaytime = true;
   if (getLocalTime(&now, 100)) {
-    isDaytime = (now.tm_hour < NIGHT_START_HOUR || now.tm_hour >= NIGHT_END_HOUR);
+    isDaytime = !isNightHour(now.tm_hour);
   }
   time_t weatherNow = time(nullptr);
   bool weatherDue = (weatherNow - lastWeatherSyncTime) >= WEATHER_SYNC_INTERVAL_S;
@@ -922,7 +1049,7 @@ void setup() {
   } else {
     checkForFirmwareUpdate();  // may flash new firmware and reboot; does not return in that case
     lastVoltage = voltage;
-    drawClock(lastVoltage);
+    drawClockForCurrentTime(lastVoltage);
     refreshClockDisplay();
   }
 
@@ -946,7 +1073,7 @@ void loop() {
       Serial.println("Maintenance listen window expired, drawing clock and going to sleep");
       maintenanceMode = false;
       lastVoltage = readBatteryVoltage();
-      drawClock(lastVoltage);
+      drawClockForCurrentTime(lastVoltage);
       refreshClockDisplay();
       uint64_t sleepDuration = getSleepDuration();
       enterDeepSleep(sleepDuration);
