@@ -420,7 +420,7 @@ void drawClock(float batteryVoltage) {
   const int marginBottom = 26;
   int bottomRowY = SCREEN_H - marginBottom - FONT_PX_LABEL;
   int ruleY = bottomRowY - 25;
-  epaper.fillRect(marginX, ruleY, SCREEN_W - marginX * 2, 3, TFT_BLACK);
+  epaper.fillRect(marginX, ruleY, SCREEN_W - marginX * 2, 1, TFT_BLACK);
 
   // Convert to 12-hour format
   const char *ampm = (hour < 12) ? "AM" : "PM";
@@ -497,30 +497,15 @@ void drawClock(float batteryVoltage) {
   }
   drawTrackedText(dateStr, marginX, bottomRowY, InterBold, FONT_PX_LABEL, 3);
 
-  // Weather, bottom-right: "<hi>°/<lo>°F · CONDITION", or a setup hint until
-  // a location has been provisioned.
+  // Weather, bottom-right: "<hi>°/<lo>°F", or a setup hint until a location
+  // has been provisioned.
   if (weatherValid) {
     char tempStr[16];
     snprintf(tempStr, sizeof(tempStr), "%d\xC2\xB0/%d\xC2\xB0", weatherHigh, weatherLow);
 
-    char descUpper[24];
-    strncpy(descUpper, weatherDesc, sizeof(descUpper) - 1);
-    descUpper[sizeof(descUpper) - 1] = '\0';
-    for (char *p = descUpper; *p; p++) *p = toupper((unsigned char)*p);
-
-    const int dotR2 = 3;
-    const int gap = 14;
-    const int letterSpacing = 3;
     int tempW = sdfTextWidth(InterBold, tempStr, FONT_PX_LABEL);
-    int descW = trackedTextWidth(descUpper, InterBold, FONT_PX_LABEL, letterSpacing);
-    int totalWeatherW = tempW + gap + dotR2 * 2 + gap + descW;
-
-    int x = SCREEN_W - marginX - totalWeatherW;
+    int x = SCREEN_W - marginX - tempW;
     sdfDrawTextTL(epaper, InterBold, x, bottomRowY, tempStr, FONT_PX_LABEL, 1.0f, TFT_BLACK);
-    x += tempW + gap;
-    epaper.fillCircle(x + dotR2, bottomRowY + 12, dotR2, TFT_BLACK);
-    x += dotR2 * 2 + gap;
-    drawTrackedText(descUpper, x, bottomRowY, InterBold, FONT_PX_LABEL, letterSpacing);
   } else if (!locationConfigured) {
     const char *hint = "PRESS BUTTON + CONNECT USB TO SET LOCATION";
     int hintW = trackedTextWidth(hint, InterBold, FONT_PX_LABEL, 3);
