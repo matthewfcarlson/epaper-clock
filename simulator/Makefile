@@ -15,7 +15,7 @@ LDFLAGS  = $(SDL_LIBS) $(TTF_LIB)
 
 all: sim
 
-faces: experiments/faces.cpp EPaperSim.h stubs/Arduino.h stubs/TFT_eSPI.h ../src/BigDigits.h
+faces: experiments/faces.cpp EPaperSim.h stubs/Arduino.h stubs/TFT_eSPI.h ../src/sdf_font.h ../src/fonts/Inter_Bold_sdf.h
 	$(CXX) $(CXXFLAGS) experiments/faces.cpp -o experiments/faces $(LDFLAGS)
 
 sim: main.cpp ../src/ota_health.cpp ../src/ota_health.h EPaperSim.h stubs/Arduino.h stubs/TFT_eSPI.h stubs/WiFi.h \

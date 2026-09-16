@@ -18,8 +18,22 @@
 #include <time.h>
 #include "config.h"
 #include "version.h"
-#include "BigDigits.h"
+#include "sdf_font.h"
+#include "fonts/Inter_Bold_sdf.h"
+#include "fonts/Inter_Regular_sdf.h"
 #include "ota_health.h"
+
+// SDF pixel heights approximating the sizes the previous bitmap/GFX fonts
+// rendered at. InterBold replaces BigDigits.h + the FreeSansBold* GFX
+// fonts; InterRegular replaces the plain GLCD/FreeSans12pt7b text.
+static const int FONT_PX_CLOCK_DIGITS = 250;  // was BigDigits (~220px tall)
+static const int FONT_PX_AMPM = 42;           // was FreeSansBold24pt7b
+static const int FONT_PX_WEEKDAY = 32;        // was FreeSansBold18pt7b
+static const int FONT_PX_LABEL = 26;          // was FreeSansBold12pt7b (date/weather/hint)
+static const int FONT_PX_NIGHT_CAPTION = 26;  // was FreeSans12pt7b
+static const int FONT_PX_BATTERY_PCT = 20;    // was GLCD font 2
+static const int FONT_PX_HEADING = 40;        // was font 4 (maintenance/update/syncing titles)
+static const int FONT_PX_BODY = 22;           // was font 2 (maintenance/update body lines)
 
 // Wake/update interval, in minutes, aligned to the clock (e.g. :00/:05/:10... for 5)
 #define DAY_WAKE_INTERVAL_MIN 5
@@ -266,33 +280,45 @@ void drawBatteryIcon(int x, int y, int percent, bool showLabel = true) {
     // Percentage text to the left of the icon
     char buf[5];
     sprintf(buf, "%d%%", percent);
-    epaper.setTextSize(1);
     // Right-align text just left of the battery icon
-    int textW = epaper.textWidth(buf, 2);
-    epaper.drawString(buf, x - textW - 4, y + 1, 2);
+    int textW = sdfTextWidth(InterRegular, buf, FONT_PX_BATTERY_PCT);
+    sdfDrawTextTL(epaper, InterRegular, x - textW - 4, y + 1, buf, FONT_PX_BATTERY_PCT, 1.0f, TFT_BLACK);
   }
 }
 
 // Draws one word letter-spaced (tracked-out, all-caps look) starting at x,
 // returning the x position immediately after the last letter.
-int drawTrackedText(const char *str, int x, int y, int fontNum, int letterSpacing) {
-  char glyph[2] = {0, 0};
-  for (const char *p = str; *p; p++) {
-    glyph[0] = *p;
-    epaper.drawString(glyph, x, y, fontNum);
-    x += epaper.textWidth(glyph, fontNum) + letterSpacing;
+int drawTrackedText(const char *str, int x, int y, const SdfFont &font, int pixelHeight,
+                     int letterSpacing, uint32_t color = TFT_BLACK) {
+  char glyph[5] = {0};
+  bool any = false;
+  for (const char *p = str; *p; ) {
+    int consumed = 1;
+    sdfUtf8Decode(p, &consumed);
+    memcpy(glyph, p, consumed);
+    glyph[consumed] = '\0';
+    p += consumed;
+    any = true;
+    sdfDrawTextTL(epaper, font, x, y, glyph, pixelHeight, 1.0f, color);
+    x += sdfTextWidth(font, glyph, pixelHeight) + letterSpacing;
   }
-  return (*str) ? x - letterSpacing : x;
+  return any ? x - letterSpacing : x;
 }
 
-int trackedTextWidth(const char *str, int fontNum, int letterSpacing) {
-  char glyph[2] = {0, 0};
+int trackedTextWidth(const char *str, const SdfFont &font, int pixelHeight, int letterSpacing) {
+  char glyph[5] = {0};
   int w = 0;
-  for (const char *p = str; *p; p++) {
-    glyph[0] = *p;
-    w += epaper.textWidth(glyph, fontNum) + letterSpacing;
+  bool any = false;
+  for (const char *p = str; *p; ) {
+    int consumed = 1;
+    sdfUtf8Decode(p, &consumed);
+    memcpy(glyph, p, consumed);
+    glyph[consumed] = '\0';
+    p += consumed;
+    any = true;
+    w += sdfTextWidth(font, glyph, pixelHeight) + letterSpacing;
   }
-  return (*str) ? w - letterSpacing : w;
+  return any ? w - letterSpacing : w;
 }
 
 static const char *WEEKDAY_NAMES[7] = {
@@ -309,7 +335,6 @@ static const char *MONTH_NAMES[12] = {
 // this screen doesn't touch WiFi at all.
 void drawMaintenanceScreen() {
   epaper.fillScreen(TFT_WHITE);
-  epaper.setTextColor(TFT_BLACK, TFT_WHITE);
 
   int cx = SCREEN_W / 2;
   int cy = SCREEN_H / 2 - 60;
@@ -321,33 +346,31 @@ void drawMaintenanceScreen() {
   // Horizontal line (tray)
   epaper.fillRect(cx - 30, cy + 48, 60, 4, TFT_BLACK);
 
-  epaper.setTextSize(1);
-  epaper.drawCentreString("Maintenance Mode", cx, cy + 70, 4);
+  sdfDrawCentreTextTL(epaper, InterBold, cx, cy + 70, "Maintenance Mode", FONT_PX_HEADING, 1.0f, TFT_BLACK);
 
   char lineBuf[48];
   snprintf(lineBuf, sizeof(lineBuf), "Listening for %lus...", (unsigned long)(PROVISION_LISTEN_MS / 1000));
-  epaper.drawCentreString(lineBuf, cx, cy + 100, 2);
-  epaper.drawCentreString("Connect USB + open provision.html to set location", cx, cy + 130, 2);
+  sdfDrawCentreTextTL(epaper, InterRegular, cx, cy + 100, lineBuf, FONT_PX_BODY, 1.0f, TFT_BLACK);
+  sdfDrawCentreTextTL(epaper, InterRegular, cx, cy + 130, "Connect USB + open provision.html to set location",
+                       FONT_PX_BODY, 1.0f, TFT_BLACK);
 
   snprintf(lineBuf, sizeof(lineBuf), "fw %s", FIRMWARE_VERSION);
-  epaper.drawCentreString(lineBuf, cx, cy + 160, 2);
+  sdfDrawCentreTextTL(epaper, InterRegular, cx, cy + 160, lineBuf, FONT_PX_BODY, 1.0f, TFT_BLACK);
 }
 
 // Draw "installing firmware update" screen shown during a nightly auto-update
 void drawUpdateScreen(const String &newVersion) {
   epaper.fillScreen(TFT_WHITE);
-  epaper.setTextColor(TFT_BLACK, TFT_WHITE);
 
   int cx = SCREEN_W / 2;
   int cy = SCREEN_H / 2 - 20;
 
-  epaper.setTextSize(1);
-  epaper.drawCentreString("Installing Update", cx, cy, 4);
+  sdfDrawCentreTextTL(epaper, InterBold, cx, cy, "Installing Update", FONT_PX_HEADING, 1.0f, TFT_BLACK);
 
   char buf[40];
   snprintf(buf, sizeof(buf), "%s -> %s", FIRMWARE_VERSION, newVersion.c_str());
-  epaper.drawCentreString(buf, cx, cy + 40, 2);
-  epaper.drawCentreString("Do not unplug...", cx, cy + 70, 2);
+  sdfDrawCentreTextTL(epaper, InterRegular, cx, cy + 40, buf, FONT_PX_BODY, 1.0f, TFT_BLACK);
+  sdfDrawCentreTextTL(epaper, InterRegular, cx, cy + 70, "Do not unplug...", FONT_PX_BODY, 1.0f, TFT_BLACK);
 }
 
 int getBatteryPercent(float voltage) {
@@ -379,77 +402,103 @@ void drawClock(float batteryVoltage) {
   }
 
   epaper.fillScreen(TFT_WHITE);
-  epaper.setTextColor(TFT_BLACK, TFT_WHITE);
 
   const int marginX = 40;
 
   // Weekday, top-left, tracked bold caps
-  epaper.setFreeFont(&FreeSansBold18pt7b);
-  epaper.setTextSize(1);
-  drawTrackedText(haveTime ? WEEKDAY_NAMES[wday] : "", marginX, 30, 1, 6);
+  drawTrackedText(haveTime ? WEEKDAY_NAMES[wday] : "", marginX, 30, InterBold, FONT_PX_WEEKDAY, 6);
 
-  // Battery icon, top-right, icon only (no percentage text)
+  // Battery icon, top-right, icon only (no percentage text) — only shown
+  // once it's actually low, so it doesn't clutter the face the rest of the
+  // time.
   int battPercent = getBatteryPercent(batteryVoltage);
-  drawBatteryIcon(SCREEN_W - marginX - 40, 34, battPercent, false);
+  if (battPercent < 20) {
+    drawBatteryIcon(SCREEN_W - marginX - 40, 34, battPercent, false);
+  }
+
+  // Bottom bar (rule + date/weather row) sits close to the bottom edge.
+  const int marginBottom = 26;
+  int bottomRowY = SCREEN_H - marginBottom - FONT_PX_LABEL;
+  int ruleY = bottomRowY - 25;
+  epaper.fillRect(marginX, ruleY, SCREEN_W - marginX * 2, 3, TFT_BLACK);
 
   // Convert to 12-hour format
   const char *ampm = (hour < 12) ? "AM" : "PM";
   int hour12 = hour % 12;
   if (hour12 == 0) hour12 = 12;
 
-  // Build full time string
   char hourStr[3];
   char minStr[3];
   sprintf(hourStr, "%d", hour12);
   sprintf(minStr, "%02d", min);
 
-  // Measure pieces and center the whole time string
-  int hourW = bigDigitsWidth(hourStr);
-  int colonW = 50;
-  int minW = bigDigitsWidth(minStr);
-  int totalW = hourW + colonW + minW;
-  int xStart = (SCREEN_W - totalW) / 2;
-  int yPos = 330;  // baseline position
+  // Stretch the big time to fill the box between the weekday row and the
+  // rule — width and height are scaled independently, since that's what an
+  // SDF atlas (vs. a fixed-size bitmap) actually buys us. Height picks
+  // pixelHeight so digit glyphs fill the available vertical band; width
+  // then picks a separate xScale so the whole "H:MM + AM/PM" row fills the
+  // available horizontal band. The colon and AM/PM sizes are kept
+  // proportional to the digit size (same ratios as the original fixed
+  // 250px-tall design) rather than independently stretched.
+  const int digitMarginX = 30;
+  const int topBound = 85;             // just below the weekday row
+  const int bottomBound = ruleY - 20;  // small gap above the rule
+  int availH = bottomBound - topBound;
 
-  drawBigDigits(epaper, xStart, yPos, hourStr);
+  const SdfGlyph *refDigit = sdfFindGlyph(InterBold, '0');
+  float scaleY = (float)availH / (float)refDigit->h;
+  int pixelHeight = (int)lroundf(scaleY * InterBold.emPx);
+  scaleY = (float)pixelHeight / (float)InterBold.emPx;
+
+  int colonWNatural = (int)lroundf(pixelHeight * (50.0f / 250.0f));
+  int fontPxAmpm = (int)lroundf(pixelHeight * (42.0f / 250.0f));
+  int dotR = (int)lroundf(pixelHeight * (14.0f / 250.0f));
+  int dotSpacing = (int)lroundf(pixelHeight * (45.0f / 250.0f));
+  int colonCenterOffset = (int)lroundf(pixelHeight * (105.0f / 250.0f));
+
+  int hourWNatural = sdfTextWidth(InterBold, hourStr, pixelHeight);
+  int minWNatural = sdfTextWidth(InterBold, minStr, pixelHeight);
+  int naturalTimeW = hourWNatural + colonWNatural + minWNatural;
+
+  const int ampmGap = 18;
+  int ampmW = sdfTextWidth(InterBold, ampm, fontPxAmpm);
+  int availWForTime = (SCREEN_W - digitMarginX * 2) - ampmGap - ampmW;
+
+  float xScale = (float)availWForTime / (float)naturalTimeW;
+
+  int hourW = (int)lroundf(hourWNatural * xScale);
+  int colonW = (int)lroundf(colonWNatural * xScale);
+  int minW = (int)lroundf(minWNatural * xScale);
+  int totalW = hourW + colonW + minW;
+
+  int xStart = digitMarginX;
+  int yPos = topBound - (int)lroundf(refDigit->yoff * scaleY);  // baseline
+
+  sdfDrawText(epaper, InterBold, xStart, yPos, hourStr, pixelHeight, xScale, TFT_BLACK);
 
   // Draw colon as two filled circles, centered on digit height
-  // Digits span from yPos-215 (top) to yPos+5 (bottom), center = yPos-105
   int colonX = xStart + hourW + colonW / 2;
-  int dotR = 14;
-  int colonCenter = yPos - 105;
-  int dotSpacing = 45;
+  int colonCenter = yPos - colonCenterOffset;
   epaper.fillCircle(colonX, colonCenter - dotSpacing, dotR, TFT_BLACK);
   epaper.fillCircle(colonX, colonCenter + dotSpacing, dotR, TFT_BLACK);
 
-  drawBigDigits(epaper, xStart + hourW + colonW, yPos, minStr);
+  sdfDrawText(epaper, InterBold, xStart + hourW + colonW, yPos, minStr, pixelHeight, xScale, TFT_BLACK);
 
   // AM/PM to the right of the digits, bottom-aligned near the digit baseline
-  epaper.setFreeFont(&FreeSansBold24pt7b);
-  epaper.setTextSize(1);
-  epaper.drawString(ampm, xStart + totalW + 18, yPos - 55, 1);
-
-  // Horizontal rule separating the time from the date/weather row
-  int ruleY = 365;
-  epaper.fillRect(marginX, ruleY, SCREEN_W - marginX * 2, 3, TFT_BLACK);
-
-  int bottomRowY = ruleY + 25;
+  sdfDrawTextTL(epaper, InterBold, xStart + totalW + ampmGap, yPos - (int)lroundf(fontPxAmpm * 1.3f),
+                ampm, fontPxAmpm, 1.0f, TFT_BLACK);
 
   // Date, bottom-left, tracked bold caps, e.g. "11 SEPTEMBER"
-  epaper.setFreeFont(&FreeSansBold12pt7b);
-  epaper.setTextSize(1);
   char dateStr[24];
   if (haveTime) {
     snprintf(dateStr, sizeof(dateStr), "%d %s", mday, MONTH_NAMES[mon]);
   } else {
     dateStr[0] = '\0';
   }
-  drawTrackedText(dateStr, marginX, bottomRowY, 1, 3);
+  drawTrackedText(dateStr, marginX, bottomRowY, InterBold, FONT_PX_LABEL, 3);
 
   // Weather, bottom-right: "<hi>°/<lo>°F · CONDITION", or a setup hint until
   // a location has been provisioned.
-  epaper.setFreeFont(&FreeSansBold12pt7b);
-  epaper.setTextSize(1);
   if (weatherValid) {
     char tempStr[16];
     snprintf(tempStr, sizeof(tempStr), "%d\xC2\xB0/%d\xC2\xB0", weatherHigh, weatherLow);
@@ -462,44 +511,40 @@ void drawClock(float batteryVoltage) {
     const int dotR2 = 3;
     const int gap = 14;
     const int letterSpacing = 3;
-    int tempW = epaper.textWidth(tempStr, 1);
-    int descW = trackedTextWidth(descUpper, 1, letterSpacing);
+    int tempW = sdfTextWidth(InterBold, tempStr, FONT_PX_LABEL);
+    int descW = trackedTextWidth(descUpper, InterBold, FONT_PX_LABEL, letterSpacing);
     int totalWeatherW = tempW + gap + dotR2 * 2 + gap + descW;
 
     int x = SCREEN_W - marginX - totalWeatherW;
-    epaper.drawString(tempStr, x, bottomRowY, 1);
+    sdfDrawTextTL(epaper, InterBold, x, bottomRowY, tempStr, FONT_PX_LABEL, 1.0f, TFT_BLACK);
     x += tempW + gap;
     epaper.fillCircle(x + dotR2, bottomRowY + 12, dotR2, TFT_BLACK);
     x += dotR2 * 2 + gap;
-    drawTrackedText(descUpper, x, bottomRowY, 1, letterSpacing);
+    drawTrackedText(descUpper, x, bottomRowY, InterBold, FONT_PX_LABEL, letterSpacing);
   } else if (!locationConfigured) {
     const char *hint = "PRESS BUTTON + CONNECT USB TO SET LOCATION";
-    int hintW = trackedTextWidth(hint, 1, 3);
-    drawTrackedText(hint, SCREEN_W - marginX - hintW, bottomRowY, 1, 3);
+    int hintW = trackedTextWidth(hint, InterBold, FONT_PX_LABEL, 3);
+    drawTrackedText(hint, SCREEN_W - marginX - hintW, bottomRowY, InterBold, FONT_PX_LABEL, 3);
   }
 }
 
 // Draws "WEEKDAY · AM" (or PM), tracked-out and centered on cx, with a small
 // dot separator — the caption under the night clock face.
 void drawNightCaption(int cx, int y, const char *weekdayUpper, const char *ampm) {
-  epaper.setFreeFont(&FreeSans12pt7b);
-  epaper.setTextSize(1);
-  epaper.setTextColor(TFT_WHITE, TFT_BLACK);
-
   const int letterSpacing = 6;
   const int gap = 20;
   const int dotR = 3;
 
-  int weekdayW = trackedTextWidth(weekdayUpper, 1, letterSpacing);
-  int ampmW = trackedTextWidth(ampm, 1, letterSpacing);
+  int weekdayW = trackedTextWidth(weekdayUpper, InterRegular, FONT_PX_NIGHT_CAPTION, letterSpacing);
+  int ampmW = trackedTextWidth(ampm, InterRegular, FONT_PX_NIGHT_CAPTION, letterSpacing);
   int totalW = weekdayW + gap + dotR * 2 + gap + ampmW;
 
   int x = cx - totalW / 2;
-  x = drawTrackedText(weekdayUpper, x, y, 1, letterSpacing);
+  x = drawTrackedText(weekdayUpper, x, y, InterRegular, FONT_PX_NIGHT_CAPTION, letterSpacing, TFT_WHITE);
   x += gap;
   epaper.fillCircle(x + dotR, y + 10, dotR, TFT_WHITE);
   x += dotR * 2 + gap;
-  drawTrackedText(ampm, x, y, 1, letterSpacing);
+  drawTrackedText(ampm, x, y, InterRegular, FONT_PX_NIGHT_CAPTION, letterSpacing, TFT_WHITE);
 }
 
 // Night-only rendering: dark background, white text, no date/weather/battery
@@ -524,7 +569,6 @@ void drawNightClock() {
   }
 
   epaper.fillScreen(TFT_BLACK);
-  epaper.setTextColor(TFT_WHITE, TFT_BLACK);
 
   const char *ampm = (hour < 12) ? "AM" : "PM";
   int hour12 = hour % 12;
@@ -535,14 +579,14 @@ void drawNightClock() {
   sprintf(hourStr, "%d", hour12);
   sprintf(minStr, "%02d", min);
 
-  int hourW = bigDigitsWidth(hourStr);
+  int hourW = sdfTextWidth(InterBold, hourStr, FONT_PX_CLOCK_DIGITS);
   int colonW = 50;
-  int minW = bigDigitsWidth(minStr);
+  int minW = sdfTextWidth(InterBold, minStr, FONT_PX_CLOCK_DIGITS);
   int totalW = hourW + colonW + minW;
   int xStart = (SCREEN_W - totalW) / 2;
   int yPos = SCREEN_H / 2 + 60;  // baseline position
 
-  drawBigDigits(epaper, xStart, yPos, hourStr, TFT_WHITE);
+  sdfDrawText(epaper, InterBold, xStart, yPos, hourStr, FONT_PX_CLOCK_DIGITS, 1.0f, TFT_WHITE);
 
   // Colon as two filled circles, centered on digit height
   int colonX = xStart + hourW + colonW / 2;
@@ -552,7 +596,7 @@ void drawNightClock() {
   epaper.fillCircle(colonX, colonCenter - dotSpacing, dotR, TFT_WHITE);
   epaper.fillCircle(colonX, colonCenter + dotSpacing, dotR, TFT_WHITE);
 
-  drawBigDigits(epaper, xStart + hourW + colonW, yPos, minStr, TFT_WHITE);
+  sdfDrawText(epaper, InterBold, xStart + hourW + colonW, yPos, minStr, FONT_PX_CLOCK_DIGITS, 1.0f, TFT_WHITE);
 
   drawNightCaption(SCREEN_W / 2, yPos + 45, haveTime ? WEEKDAY_NAMES[wday] : "", ampm);
 }
@@ -1053,9 +1097,7 @@ void setup() {
 
   if (needSync) {
     epaper.fillScreen(TFT_WHITE);
-    epaper.setTextColor(TFT_BLACK, TFT_WHITE);
-    epaper.setTextSize(1);
-    epaper.drawCentreString("Syncing...", SCREEN_W / 2, SCREEN_H / 2 - 12, 4);
+    sdfDrawCentreTextTL(epaper, InterBold, SCREEN_W / 2, SCREEN_H / 2 - 12, "Syncing...", FONT_PX_HEADING, 1.0f, TFT_BLACK);
     epaper.update();
 
     connectWiFi();
