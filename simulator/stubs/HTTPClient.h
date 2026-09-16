@@ -3,11 +3,6 @@
 #include "WiFiClientSecure.h"
 #include "Update.h"  // for the WiFiClient stand-in returned by getStreamPtr()
 
-// Fake weather response that the sketch's simple JSON parser can extract
-static const char *FAKE_WEATHER_JSON =
-    "{\"weather\":[{\"description\":\"clear sky\"}],"
-    "\"main\":{\"temp\":82.0,\"temp_min\":71.0,\"temp_max\":88.0}}";
-
 // Fake GitHub release response — tag_name is always below any real
 // FIRMWARE_VERSION so the simulator never attempts a self-update.
 static const char *FAKE_GITHUB_RELEASE_JSON =
@@ -27,7 +22,20 @@ struct HTTPClient {
     WiFiClient *getStreamPtr()                      { static WiFiClient c; return &c; }
     String getString() {
         if (url_.indexOf("api.github.com") >= 0) return String(FAKE_GITHUB_RELEASE_JSON);
-        return String(FAKE_WEATHER_JSON);
+
+        // Fake 5-day/3-hour forecast response: a few blocks around "now"
+        // with distinct temps, mimicking OWM's shape closely enough for the
+        // sketch's dt-based same-day high/low aggregation (see fetchWeather()).
+        time_t now = time(nullptr);
+        char buf[512];
+        snprintf(buf, sizeof(buf),
+            "{\"list\":["
+            "{\"dt\":%ld,\"main\":{\"temp\":71.0},\"weather\":[{\"description\":\"clear sky\"}]},"
+            "{\"dt\":%ld,\"main\":{\"temp\":88.0},\"weather\":[{\"description\":\"clear sky\"}]},"
+            "{\"dt\":%ld,\"main\":{\"temp\":79.0},\"weather\":[{\"description\":\"clear sky\"}]}"
+            "]}",
+            (long)(now - 3600), (long)now, (long)(now + 3600));
+        return String(buf);
     }
     void end() {}
 };

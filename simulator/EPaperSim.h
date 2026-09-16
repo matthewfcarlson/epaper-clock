@@ -15,13 +15,17 @@
 #define TFT_BLACK 0x000000u
 #define TFT_WHITE 0xFFFFFFu
 
-// GFX font stub — real struct has glyph data; we only use pointSize
-struct GFXfont { int pointSize; };
+// GFX font stub — real struct has glyph data; we only use pointSize/bold
+struct GFXfont { int pointSize; bool bold = false; };
 
 // Font instances referenced by the sketch
 inline const GFXfont FreeSans12pt7b  = {14};
 inline const GFXfont FreeSans18pt7b  = {20};
 inline const GFXfont FreeSans24pt7b  = {28};
+inline const GFXfont FreeSansBold9pt7b  = {12, true};
+inline const GFXfont FreeSansBold12pt7b = {15, true};
+inline const GFXfont FreeSansBold18pt7b = {21, true};
+inline const GFXfont FreeSansBold24pt7b = {29, true};
 
 #define SCREEN_W 800
 #define SCREEN_H 480
@@ -141,6 +145,7 @@ public:
     int textWidth(const char *str, int fontNum) {
         TTF_Font *f = fontAt(ptForContext(fontNum));
         if (!f) return strlen(str) * 8;
+        TTF_SetFontStyle(f, isBoldContext(fontNum) ? TTF_STYLE_BOLD : TTF_STYLE_NORMAL);
         int w = 0, h = 0;
         TTF_SizeUTF8(f, str, &w, &h);
         return w;
@@ -151,6 +156,7 @@ public:
     void drawCentreString(const char *str, int cx, int y, int fontNum) {
         TTF_Font *f = fontAt(ptForContext(fontNum));
         if (!f) return;
+        TTF_SetFontStyle(f, isBoldContext(fontNum) ? TTF_STYLE_BOLD : TTF_STYLE_NORMAL);
         int w = 0, h = 0;
         TTF_SizeUTF8(f, str, &w, &h);
         renderText(str, cx - w / 2, y, fontNum);
@@ -261,6 +267,10 @@ private:
         return builtinFontPt(fontNum) * textScale_;
     }
 
+    bool isBoldContext(int fontNum) {
+        return freeFont_ && fontNum == 1 && freeFont_->bold;
+    }
+
     void setColor(uint32_t rgb) {
         uint8_t r = (rgb >> 16) & 0xFF;
         uint8_t g = (rgb >>  8) & 0xFF;
@@ -271,6 +281,7 @@ private:
     void renderText(const char *str, int x, int y, int fontNum) {
         TTF_Font *f = fontAt(ptForContext(fontNum));
         if (!f || !str || !*str) return;
+        TTF_SetFontStyle(f, isBoldContext(fontNum) ? TTF_STYLE_BOLD : TTF_STYLE_NORMAL);
         uint8_t r = (textColor_ >> 16) & 0xFF;
         uint8_t g = (textColor_ >>  8) & 0xFF;
         uint8_t b =  textColor_        & 0xFF;

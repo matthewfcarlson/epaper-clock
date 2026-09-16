@@ -247,8 +247,9 @@ void drawWifiIcon(int x, int y, bool connected) {
   }
 }
 
-// Draw battery outline + fill at (x, y), 40x18px, with percentage text
-void drawBatteryIcon(int x, int y, int percent) {
+// Draw battery outline + fill at (x, y), 36x18px, optionally with percentage
+// text to its left.
+void drawBatteryIcon(int x, int y, int percent, bool showLabel = true) {
   // Battery body outline (36x18)
   epaper.drawRect(x, y, 36, 18, TFT_BLACK);
   epaper.drawRect(x + 1, y + 1, 34, 16, TFT_BLACK);
@@ -261,14 +262,46 @@ void drawBatteryIcon(int x, int y, int percent) {
     epaper.fillRect(x + 3, y + 3, fillW, 12, TFT_BLACK);
   }
 
-  // Percentage text to the left of the icon
-  char buf[5];
-  sprintf(buf, "%d%%", percent);
-  epaper.setTextSize(1);
-  // Right-align text just left of the battery icon
-  int textW = epaper.textWidth(buf, 2);
-  epaper.drawString(buf, x - textW - 4, y + 1, 2);
+  if (showLabel) {
+    // Percentage text to the left of the icon
+    char buf[5];
+    sprintf(buf, "%d%%", percent);
+    epaper.setTextSize(1);
+    // Right-align text just left of the battery icon
+    int textW = epaper.textWidth(buf, 2);
+    epaper.drawString(buf, x - textW - 4, y + 1, 2);
+  }
 }
+
+// Draws one word letter-spaced (tracked-out, all-caps look) starting at x,
+// returning the x position immediately after the last letter.
+int drawTrackedText(const char *str, int x, int y, int fontNum, int letterSpacing) {
+  char glyph[2] = {0, 0};
+  for (const char *p = str; *p; p++) {
+    glyph[0] = *p;
+    epaper.drawString(glyph, x, y, fontNum);
+    x += epaper.textWidth(glyph, fontNum) + letterSpacing;
+  }
+  return (*str) ? x - letterSpacing : x;
+}
+
+int trackedTextWidth(const char *str, int fontNum, int letterSpacing) {
+  char glyph[2] = {0, 0};
+  int w = 0;
+  for (const char *p = str; *p; p++) {
+    glyph[0] = *p;
+    w += epaper.textWidth(glyph, fontNum) + letterSpacing;
+  }
+  return (*str) ? w - letterSpacing : w;
+}
+
+static const char *WEEKDAY_NAMES[7] = {
+  "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"
+};
+static const char *MONTH_NAMES[12] = {
+  "JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE",
+  "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"
+};
 
 // Draw the maintenance-mode listening screen — download arrow icon + text.
 // Maintenance mode is serial-only (location provisioning over USB); firmware
@@ -317,21 +350,6 @@ void drawUpdateScreen(const String &newVersion) {
   epaper.drawCentreString("Do not unplug...", cx, cy + 70, 2);
 }
 
-// Format seconds-since-charge as a compact string into buf, e.g. "3d4h", "5h12m", "8m".
-void formatUptime(time_t secs, char *buf, size_t bufLen) {
-  if (secs < 0) secs = 0;
-  long days = secs / 86400;
-  long hours = (secs % 86400) / 3600;
-  long mins = (secs % 3600) / 60;
-  if (days > 0) {
-    snprintf(buf, bufLen, "%ldd%ldh", days, hours);
-  } else if (hours > 0) {
-    snprintf(buf, bufLen, "%ldh%ldm", hours, mins);
-  } else {
-    snprintf(buf, bufLen, "%ldm", mins);
-  }
-}
-
 int getBatteryPercent(float voltage) {
   int percent = (int)((voltage - BATT_V_EMPTY) / (BATT_V_FULL - BATT_V_EMPTY) * 100.0);
   if (percent > 100) percent = 100;
@@ -341,11 +359,15 @@ int getBatteryPercent(float voltage) {
 
 void drawClock(float batteryVoltage) {
   struct tm timeinfo;
-  int hour = 0, min = 0;
+  int hour = 0, min = 0, wday = 0, mday = 0, mon = 0;
+  bool haveTime = getLocalTime(&timeinfo, 100);
 
-  if (getLocalTime(&timeinfo, 100)) {
+  if (haveTime) {
     hour = timeinfo.tm_hour;
     min = timeinfo.tm_min;
+    wday = timeinfo.tm_wday;
+    mday = timeinfo.tm_mday;
+    mon = timeinfo.tm_mon;
   }
 
   // Round the displayed time to the nearest 5-minute mark, matching the
@@ -358,6 +380,17 @@ void drawClock(float batteryVoltage) {
 
   epaper.fillScreen(TFT_WHITE);
   epaper.setTextColor(TFT_BLACK, TFT_WHITE);
+
+  const int marginX = 40;
+
+  // Weekday, top-left, tracked bold caps
+  epaper.setFreeFont(&FreeSansBold18pt7b);
+  epaper.setTextSize(1);
+  drawTrackedText(haveTime ? WEEKDAY_NAMES[wday] : "", marginX, 30, 1, 6);
+
+  // Battery icon, top-right, icon only (no percentage text)
+  int battPercent = getBatteryPercent(batteryVoltage);
+  drawBatteryIcon(SCREEN_W - marginX - 40, 34, battPercent, false);
 
   // Convert to 12-hour format
   const char *ampm = (hour < 12) ? "AM" : "PM";
@@ -376,7 +409,7 @@ void drawClock(float batteryVoltage) {
   int minW = bigDigitsWidth(minStr);
   int totalW = hourW + colonW + minW;
   int xStart = (SCREEN_W - totalW) / 2;
-  int yPos = SCREEN_H / 2 + 80;  // baseline position
+  int yPos = 330;  // baseline position
 
   drawBigDigits(epaper, xStart, yPos, hourStr);
 
@@ -391,62 +424,59 @@ void drawClock(float batteryVoltage) {
 
   drawBigDigits(epaper, xStart + hourW + colonW, yPos, minStr);
 
-  // AM/PM below the time
-  epaper.setFreeFont(&FreeSans12pt7b);
+  // AM/PM to the right of the digits, bottom-aligned near the digit baseline
+  epaper.setFreeFont(&FreeSansBold24pt7b);
   epaper.setTextSize(1);
-  epaper.drawCentreString(ampm, SCREEN_W / 2, yPos + 30, 1);
+  epaper.drawString(ampm, xStart + totalW + 18, yPos - 55, 1);
 
-  // Weather in bottom-left corner
+  // Horizontal rule separating the time from the date/weather row
+  int ruleY = 365;
+  epaper.fillRect(marginX, ruleY, SCREEN_W - marginX * 2, 3, TFT_BLACK);
+
+  int bottomRowY = ruleY + 25;
+
+  // Date, bottom-left, tracked bold caps, e.g. "11 SEPTEMBER"
+  epaper.setFreeFont(&FreeSansBold12pt7b);
+  epaper.setTextSize(1);
+  char dateStr[24];
+  if (haveTime) {
+    snprintf(dateStr, sizeof(dateStr), "%d %s", mday, MONTH_NAMES[mon]);
+  } else {
+    dateStr[0] = '\0';
+  }
+  drawTrackedText(dateStr, marginX, bottomRowY, 1, 3);
+
+  // Weather, bottom-right: "<hi>°/<lo>°F · CONDITION", or a setup hint until
+  // a location has been provisioned.
+  epaper.setFreeFont(&FreeSansBold12pt7b);
+  epaper.setTextSize(1);
   if (weatherValid) {
-    epaper.setFreeFont(&FreeSans12pt7b);
-    epaper.setTextSize(1);
-    char weatherLine[48];
-    snprintf(weatherLine, sizeof(weatherLine), "%s  %d°/%d°F", weatherDesc, weatherHigh, weatherLow);
-    epaper.drawString(weatherLine, 10, SCREEN_H - 30, 1);
+    char tempStr[16];
+    snprintf(tempStr, sizeof(tempStr), "%d\xC2\xB0/%d\xC2\xB0", weatherHigh, weatherLow);
+
+    char descUpper[24];
+    strncpy(descUpper, weatherDesc, sizeof(descUpper) - 1);
+    descUpper[sizeof(descUpper) - 1] = '\0';
+    for (char *p = descUpper; *p; p++) *p = toupper((unsigned char)*p);
+
+    const int dotR2 = 3;
+    const int gap = 14;
+    const int letterSpacing = 3;
+    int tempW = epaper.textWidth(tempStr, 1);
+    int descW = trackedTextWidth(descUpper, 1, letterSpacing);
+    int totalWeatherW = tempW + gap + dotR2 * 2 + gap + descW;
+
+    int x = SCREEN_W - marginX - totalWeatherW;
+    epaper.drawString(tempStr, x, bottomRowY, 1);
+    x += tempW + gap;
+    epaper.fillCircle(x + dotR2, bottomRowY + 12, dotR2, TFT_BLACK);
+    x += dotR2 * 2 + gap;
+    drawTrackedText(descUpper, x, bottomRowY, 1, letterSpacing);
   } else if (!locationConfigured) {
-    epaper.setFreeFont(&FreeSans12pt7b);
-    epaper.setTextSize(1);
-    epaper.drawString("Press button + connect USB to set location", 10, SCREEN_H - 30, 1);
+    const char *hint = "PRESS BUTTON + CONNECT USB TO SET LOCATION";
+    int hintW = trackedTextWidth(hint, 1, 3);
+    drawTrackedText(hint, SCREEN_W - marginX - hintW, bottomRowY, 1, 3);
   }
-
-  // Battery icon in bottom-right corner
-  int battPercent = getBatteryPercent(batteryVoltage);
-  drawBatteryIcon(SCREEN_W - 50, SCREEN_H - 28, battPercent);
-
-  // Uptime since last charge, right-aligned just above the battery icon.
-  // Clear the free font first: TFT_eSPI keeps the previously-set GFX free font
-  // active as "font 1", so without this the uptime would render in 12pt instead
-  // of the small GLCD font (the simulator doesn't replicate this quirk).
-  if (bootEpoch > 0) {
-    char uptimeBuf[16];
-    formatUptime(time(nullptr) - bootEpoch, uptimeBuf, sizeof(uptimeBuf));
-    epaper.setFreeFont(nullptr);
-    epaper.setTextSize(1);
-    int uptimeW = epaper.textWidth(uptimeBuf, 1);
-    epaper.drawString(uptimeBuf, (SCREEN_W - 10) - uptimeW, SCREEN_H - 46, 1);
-  }
-}
-
-// Draws one word letter-spaced (tracked-out, all-caps look) starting at x,
-// returning the x position immediately after the last letter.
-int drawTrackedText(const char *str, int x, int y, int fontNum, int letterSpacing) {
-  char glyph[2] = {0, 0};
-  for (const char *p = str; *p; p++) {
-    glyph[0] = *p;
-    epaper.drawString(glyph, x, y, fontNum);
-    x += epaper.textWidth(glyph, fontNum) + letterSpacing;
-  }
-  return (*str) ? x - letterSpacing : x;
-}
-
-int trackedTextWidth(const char *str, int fontNum, int letterSpacing) {
-  char glyph[2] = {0, 0};
-  int w = 0;
-  for (const char *p = str; *p; p++) {
-    glyph[0] = *p;
-    w += epaper.textWidth(glyph, fontNum) + letterSpacing;
-  }
-  return (*str) ? w - letterSpacing : w;
 }
 
 // Draws "WEEKDAY · AM" (or PM), tracked-out and centered on cx, with a small
@@ -524,10 +554,7 @@ void drawNightClock() {
 
   drawBigDigits(epaper, xStart + hourW + colonW, yPos, minStr, TFT_WHITE);
 
-  static const char *weekdayNames[7] = {
-    "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"
-  };
-  drawNightCaption(SCREEN_W / 2, yPos + 45, haveTime ? weekdayNames[wday] : "", ampm);
+  drawNightCaption(SCREEN_W / 2, yPos + 45, haveTime ? WEEKDAY_NAMES[wday] : "", ampm);
 }
 
 // Picks day or night rendering based on the current time and draws the
@@ -646,6 +673,13 @@ bool syncNTP() {
   return false;
 }
 
+// Fetches today's actual high/low + a representative condition description.
+// Uses the 5-day/3-hour forecast endpoint rather than the current-weather
+// endpoint: the latter's temp_min/temp_max fields are documented by OWM as
+// "minimum/maximum temperature at the moment" (a deviation figure for large,
+// geographically-spread cities), not the day's real range — aggregating the
+// "temp" field across every 3-hour block that falls on today's local date
+// gives the actual high/low instead.
 bool fetchWeather() {
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
@@ -655,13 +689,19 @@ bool fetchWeather() {
     return false;
   }
 
+  struct tm todayTm;
+  if (!getLocalTime(&todayTm, 100)) {
+    Serial.println("Weather: no local time available — skipping");
+    return false;
+  }
+
   HTTPClient http;
   char url[256];
   snprintf(url, sizeof(url),
-    "http://api.openweathermap.org/data/2.5/weather?lat=%.2f&lon=%.2f&units=imperial&appid=%s",
+    "http://api.openweathermap.org/data/2.5/forecast?lat=%.2f&lon=%.2f&units=imperial&appid=%s",
     userLat, userLon, OWM_API_KEY);
 
-  Serial.println("Fetching weather...");
+  Serial.println("Fetching weather forecast...");
   http.begin(url);
   int httpCode = http.GET();
 
@@ -674,30 +714,54 @@ bool fetchWeather() {
   String payload = http.getString();
   http.end();
 
-  // Simple JSON parsing — find temp_min, temp_max, and weather description
-  // Look for "temp_min": and "temp_max":
-  int idx;
+  int high = -1000, low = 1000;
+  String desc;
 
-  idx = payload.indexOf("\"temp_min\":");
-  if (idx >= 0) {
-    weatherLow = (int)payload.substring(idx + 11).toFloat();
-  }
+  int idx = payload.indexOf("\"dt\":");
+  while (idx >= 0) {
+    int numStart = idx + 5;
+    int numEnd = payload.indexOf(",", numStart);
+    if (numEnd < 0) break;
+    time_t dt = (time_t)payload.substring(numStart, numEnd).toInt();
 
-  idx = payload.indexOf("\"temp_max\":");
-  if (idx >= 0) {
-    weatherHigh = (int)payload.substring(idx + 11).toFloat();
-  }
+    int nextIdx = payload.indexOf("\"dt\":", numEnd);
+    int blockEnd = (nextIdx >= 0) ? nextIdx : payload.length();
 
-  // Weather description: "description":"clear sky"
-  idx = payload.indexOf("\"description\":\"");
-  if (idx >= 0) {
-    int start = idx + 15;
-    int end = payload.indexOf("\"", start);
-    String desc = payload.substring(start, end);
-    // Capitalize first letter
-    if (desc.length() > 0) {
-      desc[0] = toupper(desc[0]);
+    struct tm blockTm;
+    localtime_r(&dt, &blockTm);
+    bool sameDay = (blockTm.tm_year == todayTm.tm_year) &&
+                   (blockTm.tm_mon == todayTm.tm_mon) &&
+                   (blockTm.tm_mday == todayTm.tm_mday);
+
+    if (sameDay) {
+      int tIdx = payload.indexOf("\"temp\":", numEnd);
+      if (tIdx >= 0 && tIdx < blockEnd) {
+        int temp = (int)payload.substring(tIdx + 7).toFloat();
+        if (temp > high) high = temp;
+        if (temp < low) low = temp;
+      }
+      if (desc.length() == 0) {
+        int dIdx = payload.indexOf("\"description\":\"", numEnd);
+        if (dIdx >= 0 && dIdx < blockEnd) {
+          int start = dIdx + 15;
+          int end = payload.indexOf("\"", start);
+          desc = payload.substring(start, end);
+        }
+      }
     }
+
+    idx = nextIdx;
+  }
+
+  if (high == -1000 || low == 1000) {
+    Serial.println("Weather: no forecast blocks for today — skipping");
+    return false;
+  }
+
+  weatherHigh = high;
+  weatherLow = low;
+  if (desc.length() > 0) {
+    desc[0] = toupper(desc[0]);
     strncpy(weatherDesc, desc.c_str(), sizeof(weatherDesc) - 1);
     weatherDesc[sizeof(weatherDesc) - 1] = '\0';
   }
