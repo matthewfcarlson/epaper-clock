@@ -30,6 +30,11 @@ The board (`seeed_xiao_esp32s3`) and the Seeed_GFX library dependency are declar
 ```cpp
 #pragma once
 
+// Dev-convenience fallback only — used until WiFi is provisioned at runtime
+// over USB serial (see "Location & WiFi provisioning" below), at which point
+// the NVS-stored credentials take priority. The public release build ships
+// these as empty strings; a real device only ever gets real credentials via
+// serial provisioning, never compiled into the binary.
 const char *WIFI_SSID = "your_ssid";
 const char *WIFI_PASS = "your_password";
 
@@ -114,19 +119,26 @@ First boot stays awake for 60 seconds so the serial monitor (`pio device monitor
 
 On normal (non-button) wakes during the night window (11pm-6am), and at most once every 24 hours, the device checks `https://api.github.com/repos/{OTA_GITHUB_OWNER}/{OTA_GITHUB_REPO}/releases/latest`. The very first wake after a fresh flash is an exception: it forces the check regardless of the time of day or the 24-hour throttle, so a newly-flashed device doesn't have to wait for the next night window to pick up a release that's already newer. If the release's tag is a newer semver than `version.h`'s `FIRMWARE_VERSION`, it downloads the first `.bin` asset attached to that release, flashes it via `Update.h`, and reboots. A release with no `.bin` asset is ignored. A failed download/flash is retried on the next check (nightly, or the next forced first-wake check after a reflash), up to `OTA_MAX_UPDATE_ATTEMPTS`, before that version is skipped until a newer tag appears.
 
-To ship an update: bump `FIRMWARE_VERSION` in `src/version.h`, commit, then `git tag v1.0.1 && git push origin v1.0.1`. `.github/workflows/release-firmware.yml` builds and publishes the release automatically — it rejects the push if the tag doesn't match `FIRMWARE_VERSION`. That workflow assembles `src/config.h` from repo secrets (`WIFI_SSID`, `WIFI_PASS`, `TZ_INFO`, `OWM_API_KEY`) rather than the CI job's placeholder values, since this `.bin` is what devices actually self-flash — building it with fake WiFi credentials would strand every device that updates. Set those secrets once via the repo's Settings → Secrets and variables → Actions (or `gh secret set NAME`).
+To ship an update: bump `FIRMWARE_VERSION` in `src/version.h`, commit, then `git tag v1.0.1 && git push origin v1.0.1`. `.github/workflows/release-firmware.yml` builds and publishes the release automatically — it rejects the push if the tag doesn't match `FIRMWARE_VERSION`. That workflow assembles `src/config.h` from repo secrets (`TZ_INFO`, `OWM_API_KEY`) rather than the CI job's placeholder values, since this `.bin` is what devices actually self-flash. `WIFI_SSID`/`WIFI_PASS` are deliberately *not* pulled from secrets and are always written blank — the release is a public download, and WiFi credentials belong in NVS via serial provisioning (see "Location & WiFi provisioning" below), not in a binary anyone can pull apart. Set the `TZ_INFO`/`OWM_API_KEY` secrets once via the repo's Settings → Secrets and variables → Actions (or `gh secret set NAME`).
 
 Rollback safety net: `src/ota_health.h`/`.cpp` (`OtaHealth`) guards against a bad release. The ESP-IDF bootloader's app-rollback feature and this board's default two-OTA-slot partition table are already enabled by the stock Arduino-ESP32 core for esp32s3, so no custom `sdkconfig` is needed. `checkForFirmwareUpdate()` calls `otaHealth.recordOtaAttempt()` right before rebooting into a freshly-flashed build; `setup()` calls `otaHealth.checkBootHealth()` as early as possible on every boot and `otaHealth.confirmHealthy()` once a wake cycle completes without crashing. Two layers of protection result: a boot-time crash/panic on the new partition is rolled back automatically by the bootloader before any app code runs, and firmware that boots but never manages to complete a wake cycle (e.g. a WiFi regression) is force-rolled-back by `OtaHealth` itself after `OTA_MAX_UNCONFIRMED_BOOT_ATTEMPTS` (3) unconfirmed boots. Either way the device reverts to the last-known-good build rather than staying stuck on a bad release. Set `OTA_UPDATES_ENABLED = false` in `src/config.h` to disable the check entirely.
 
-### Location provisioning (weather lat/lon)
+### Location & WiFi provisioning
 
-Weather's lat/lon is no longer a build-time constant — it's set by the user at runtime and stored in NVS via the ESP32 `Preferences` library (namespace `"clockcfg"`, keys `loc_set`/`lat`/`lon`), so one firmware build works for any device/location and there's nothing location-specific to bake in or leak via a repo secret. Until set, weather fetching is skipped entirely (no bogus `0,0` lookup) and the clock face shows a short "press button + connect USB" hint in the weather corner.
+Weather's lat/lon and the device's WiFi credentials are no longer build-time constants — both are set by the user at runtime and stored in NVS via the ESP32 `Preferences` library (namespace `"clockcfg"`, keys `loc_set`/`lat`/`lon` for location, `wifi_set`/`ssid`/`pass` for WiFi), so one firmware build works for any device/location/network and there's nothing device-specific to bake in or leak via a repo secret or a public release binary. Until location is set, weather fetching is skipped entirely (no bogus `0,0` lookup); until WiFi is set (and no compiled-in `config.h` fallback is present — see below), `connectWiFi()` skips connecting entirely rather than blocking on a doomed attempt. Either way the clock face shows a short "press button + connect USB" hint in the weather corner naming whichever is missing.
 
-Setting it: press a button to enter the maintenance window (see above), plug in a USB cable, and open `docs/provision.html` (hosted via GitHub Pages, or served locally with e.g. `python3 -m http.server` from `docs/` — Web Serial requires a secure or localhost context) in Chrome or Edge on a computer. The page uses the [Web Serial API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Serial_API) to talk to the device over the same native-USB CDC connection already used for flashing/`pio device monitor` — no new USB descriptors, no pairing. It reads the device's current status and lets you enter lat/lon manually or via the browser's geolocation.
+`connectWiFi()` prefers the NVS-stored credentials but falls back to the compiled-in `WIFI_SSID`/`WIFI_PASS` (`config.h`) when NVS hasn't been provisioned yet. `config.h` is gitignored and only a local dev convenience — the public release build (`release-firmware.yml`) always compiles it with those two fields blank, so the distributed `.bin` never contains a real network's credentials. A freshly flashed device therefore has no working fallback and must be provisioned once over serial before it can reach WiFi at all; from then on the NVS-stored credentials persist across every future OTA update (NVS isn't touched by an app-partition flash) independently of what's compiled into any given release.
+
+Setting either: press a button to enter the maintenance window (see above), plug in a USB cable, and open `docs/provision.html` (hosted via GitHub Pages, or served locally with e.g. `python3 -m http.server` from `docs/` — Web Serial requires a secure or localhost context) in Chrome or Edge on a computer. The page uses the [Web Serial API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Serial_API) to talk to the device over the same native-USB CDC connection already used for flashing/`pio device monitor` — no new USB descriptors, no pairing. It reads the device's current status and lets you enter WiFi SSID/password and lat/lon manually, plus lat/lon via the browser's geolocation.
 
 Wire protocol, plain text lines over the existing `Serial` (commands prefixed `CFG `, replies prefixed `>>` so the page can filter them out of ordinary debug logging on the same stream):
-- `CFG GET_STATUS` → `>>STATUS configured=0|1 lat=<f> lon=<f> fw=<version>`
+- `CFG GET_STATUS` → `>>STATUS configured=0|1 lat=<f> lon=<f> fw=<version> wifi=0|1`
 - `CFG SET_LOCATION <lat> <lon>` → `>>OK SET_LOCATION` or `>>ERR RANGE|PARSE`
+- `CFG GET_WIFI_SSID` → `>>WIFI_SSID <ssid>` (blank when unset) — the password is never echoed back
+- `CFG SET_WIFI_SSID <ssid>` → `>>OK SET_WIFI_SSID` or `>>ERR RANGE`
+- `CFG SET_WIFI_PASS <pass>` → `>>OK SET_WIFI_PASS` or `>>ERR RANGE` (empty is valid, for an open network)
+
+SSID/password are separate commands (rather than sharing one line like `SET_LOCATION`'s two floats) because either can legitimately contain spaces — each takes the rest of its line verbatim.
 
 Web Serial is Chrome/Edge desktop only (no Safari, no iOS on any browser).
 

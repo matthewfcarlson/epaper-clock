@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>XIAO ePaper Clock — Location Setup</title>
+<title>XIAO ePaper Clock — WiFi + Location Setup</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -53,7 +53,7 @@
   .row { display: flex; gap: 8px; margin-bottom: 12px; }
   .row > * { flex: 1; }
   label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 4px; }
-  input[type=number] {
+  input[type=number], input[type=text], input[type=password] {
     width: 100%;
     padding: 8px 10px;
     border-radius: 8px;
@@ -62,6 +62,8 @@
     color: var(--text);
     font-size: 15px;
   }
+  .hint { font-size: 0.78rem; color: var(--muted); margin: -8px 0 12px; }
+  h2.section { font-size: 0.85rem; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
   button {
     padding: 10px 16px;
     border-radius: 8px;
@@ -119,8 +121,8 @@
 </head>
 <body>
 <main>
-  <h1>XIAO ePaper Clock — Location Setup</h1>
-  <p class="sub">Sets the weather location over USB using the Web Serial API. Press a button on the device to enter maintenance mode, plug it in, then connect below.</p>
+  <h1>XIAO ePaper Clock — WiFi + Location Setup</h1>
+  <p class="sub">Sets WiFi credentials and the weather location over USB using the Web Serial API. Press a button on the device to enter maintenance mode, plug it in, then connect below.</p>
 
   <div id="unsupported" class="unsupported hidden">
     Your browser doesn't support the Web Serial API. Open this page in
@@ -138,6 +140,18 @@
   <div id="configPanel" class="panel hidden">
     <p id="deviceInfo" class="status-line"></p>
 
+    <h2 class="section">WiFi</h2>
+    <div class="field">
+      <label for="ssid">Network name (SSID)</label>
+      <input type="text" id="ssid" placeholder="MyHomeNetwork" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="pass">Password</label>
+      <input type="password" id="pass" placeholder="Leave blank for an open network" autocomplete="off">
+      <p class="hint">Only sent if you edit the network name or type a password — the device's stored password is never shown here.</p>
+    </div>
+
+    <h2 class="section">Location</h2>
     <div class="field">
       <div class="row">
         <div>
@@ -175,6 +189,8 @@
   const connState = document.getElementById('connState');
   const configPanel = document.getElementById('configPanel');
   const deviceInfo = document.getElementById('deviceInfo');
+  const ssidInput = document.getElementById('ssid');
+  const passInput = document.getElementById('pass');
   const latInput = document.getElementById('lat');
   const lonInput = document.getElementById('lon');
   const geoBtn = document.getElementById('geoBtn');
@@ -221,6 +237,11 @@
   let readLoopPromise = null;
   let lineBuf = '';
   let pendingReplyResolve = null;
+  // Last SSID reported by the device — lets saveBtn tell "field still shows
+  // the prefilled current network" apart from "user actually typed a new
+  // one", since the password field can never be prefilled (never echoed
+  // back) and we don't want an untouched save to silently blank it out.
+  let currentSsid = '';
 
   function setConnState(text, cls) {
     connState.textContent = text;
@@ -296,12 +317,27 @@
       const reply = await sendCommand('CFG GET_STATUS');
       const st = parseStatus(reply);
       const configured = st.configured === '1';
-      deviceInfo.textContent = `Firmware ${st.fw || '?'} — location ` +
-        (configured ? `set (${st.lat}, ${st.lon})` : 'not set');
       if (configured) {
         latInput.value = st.lat;
         lonInput.value = st.lon;
       }
+
+      let wifiLabel = 'not set';
+      if (st.wifi === '1') {
+        try {
+          const wifiReply = await sendCommand('CFG GET_WIFI_SSID');
+          currentSsid = wifiReply.replace(/^WIFI_SSID\s?/, '');
+          if (currentSsid) {
+            ssidInput.value = currentSsid;
+            wifiLabel = `"${currentSsid}"`;
+          }
+        } catch (e) {
+          wifiLabel = 'set (could not read SSID)';
+        }
+      }
+
+      deviceInfo.textContent = `Firmware ${st.fw || '?'} — WiFi ${wifiLabel} — location ` +
+        (configured ? `set (${st.lat}, ${st.lon})` : 'not set');
     } catch (e) {
       deviceInfo.textContent = 'Connected, but device did not respond — is it in maintenance mode?';
     }
@@ -360,30 +396,49 @@
   });
 
   saveBtn.addEventListener('click', async () => {
-    const lat = parseFloat(latInput.value);
-    const lon = parseFloat(lonInput.value);
-    if (Number.isNaN(lat) || Number.isNaN(lon)) {
-      saveResult.textContent = 'Enter both latitude and longitude.';
+    const ssid = ssidInput.value.trim();
+    const pass = passInput.value;
+    // Only touch WiFi if the field no longer matches what the device
+    // reported (a real edit) or a password was actually typed — an
+    // untouched, prefilled SSID with an empty password field means "leave
+    // WiFi alone," not "set this network with no password."
+    const wantsWifi = ssid.length > 0 && (ssid !== currentSsid || pass.length > 0);
+
+    const latRaw = latInput.value.trim();
+    const lonRaw = lonInput.value.trim();
+    const lat = parseFloat(latRaw);
+    const lon = parseFloat(lonRaw);
+    const wantsLocation = latRaw.length > 0 && lonRaw.length > 0 && !Number.isNaN(lat) && !Number.isNaN(lon);
+
+    if (!wantsWifi && !wantsLocation) {
+      saveResult.textContent = 'Enter a WiFi network and/or both latitude and longitude.';
       saveResult.className = 'status-line err';
       return;
     }
+
     saveBtn.disabled = true;
     saveResult.textContent = 'Saving…';
     saveResult.className = 'status-line';
     try {
-      const reply = await sendCommand(`CFG SET_LOCATION ${lat} ${lon}`);
-      if (reply === 'OK SET_LOCATION') {
-        await refreshStatus();
-        saveResult.textContent = 'Saved — rebooting device to show the clock…';
-        saveResult.className = 'status-line ok';
-        try {
-          await sendFireAndForget('CFG REBOOT');
-        } catch (e) {
-          log('meta', 'Reboot command failed to send: ' + e.message);
-        }
-      } else {
-        saveResult.textContent = 'Device rejected it: ' + reply;
-        saveResult.className = 'status-line err';
+      if (wantsWifi) {
+        const ssidReply = await sendCommand(`CFG SET_WIFI_SSID ${ssid}`);
+        if (ssidReply !== 'OK SET_WIFI_SSID') throw new Error('WiFi SSID rejected: ' + ssidReply);
+        const passReply = await sendCommand(`CFG SET_WIFI_PASS ${pass}`);
+        if (passReply !== 'OK SET_WIFI_PASS') throw new Error('WiFi password rejected: ' + passReply);
+      }
+      if (wantsLocation) {
+        const locReply = await sendCommand(`CFG SET_LOCATION ${lat} ${lon}`);
+        if (locReply !== 'OK SET_LOCATION') throw new Error('Location rejected: ' + locReply);
+      }
+
+      await refreshStatus();
+      passInput.value = '';
+      saveResult.textContent = 'Saved — rebooting device to show the clock…';
+      saveResult.className = 'status-line ok';
+      try {
+        await sendFireAndForget('CFG REBOOT');
+      } catch (e) {
+        log('meta', 'Reboot command failed to send: ' + e.message);
       }
     } catch (e) {
       saveResult.textContent = 'Error: ' + e.message;

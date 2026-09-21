@@ -37,23 +37,26 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio
 
-      # config.h is gitignored (it holds real WiFi/API credentials), so the
-      # release build assembles it from repo secrets instead of the CI job's
-      # placeholder values — this .bin is what devices actually self-flash
-      # via the nightly OTA check, so it needs real credentials or they'd
-      # lose WiFi on update.
+      # config.h is gitignored, so the release build assembles it from repo
+      # secrets instead of the CI job's placeholder values — this .bin is
+      # what devices actually self-flash via the nightly OTA check.
+      # WIFI_SSID/WIFI_PASS are deliberately left blank here rather than
+      # pulled from secrets: this release is a public download, and baking a
+      # real network's credentials into a binary anyone can pull apart with
+      # `strings` would leak them. WiFi is provisioned at runtime over USB
+      # serial instead (see docs/provision.html / CLAUDE.md's "Location &
+      # WiFi provisioning") and persists in NVS across every future OTA
+      # update, independent of what any given release compiles in.
       - name: Write config.h from secrets
         env:
-          WIFI_SSID: ${{ secrets.WIFI_SSID }}
-          WIFI_PASS: ${{ secrets.WIFI_PASS }}
           TZ_INFO: ${{ secrets.TZ_INFO }}
           OWM_API_KEY: ${{ secrets.OWM_API_KEY }}
         run: |
           repo_name="${GITHUB_REPOSITORY#*/}"
           cat > src/config.h <<EOF
           #pragma once
-          const char *WIFI_SSID = "$WIFI_SSID";
-          const char *WIFI_PASS = "$WIFI_PASS";
+          const char *WIFI_SSID = "";
+          const char *WIFI_PASS = "";
           const char *TZ_INFO = "$TZ_INFO";
           const char *NTP_SERVER1 = "pool.ntp.org";
           const char *NTP_SERVER2 = "time.nist.gov";
