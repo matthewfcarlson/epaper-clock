@@ -469,8 +469,8 @@ void drawClock(float batteryVoltage) {
   int dotSpacing = (int)lroundf(pixelHeight * (45.0f / 250.0f));
   int colonCenterOffset = (int)lroundf(pixelHeight * (105.0f / 250.0f));
 
-  int hourWNatural = sdfTextWidth(InterBold, hourStr, pixelHeight);
-  int minWNatural = sdfTextWidth(InterBold, minStr, pixelHeight);
+  int hourWNatural = sdfTabularDigitsWidth(InterBold, strlen(hourStr), pixelHeight);
+  int minWNatural = sdfTabularDigitsWidth(InterBold, strlen(minStr), pixelHeight);
   int naturalTimeW = hourWNatural + colonWNatural + minWNatural;
 
   const int ampmGap = 18;
@@ -487,7 +487,7 @@ void drawClock(float batteryVoltage) {
   int xStart = digitMarginX;
   int yPos = topBound - (int)lroundf(refDigit->yoff * scaleY);  // baseline
 
-  sdfDrawText(epaper, InterBold, xStart, yPos, hourStr, pixelHeight, xScale, TFT_BLACK);
+  sdfDrawTabularDigits(epaper, InterBold, xStart, yPos, hourStr, pixelHeight, xScale, TFT_BLACK);
 
   // Draw colon as two filled circles, centered on digit height
   int colonX = xStart + hourW + colonW / 2;
@@ -495,7 +495,7 @@ void drawClock(float batteryVoltage) {
   epaper.fillCircle(colonX, colonCenter - dotSpacing, dotR, TFT_BLACK);
   epaper.fillCircle(colonX, colonCenter + dotSpacing, dotR, TFT_BLACK);
 
-  sdfDrawText(epaper, InterBold, xStart + hourW + colonW, yPos, minStr, pixelHeight, xScale, TFT_BLACK);
+  sdfDrawTabularDigits(epaper, InterBold, xStart + hourW + colonW, yPos, minStr, pixelHeight, xScale, TFT_BLACK);
 
   // AM/PM to the right of the digits, bottom-aligned near the digit baseline
   sdfDrawTextTL(epaper, InterBold, xStart + totalW + ampmGap, yPos - (int)lroundf(fontPxAmpm * 1.3f),
@@ -587,14 +587,14 @@ void drawNightClock() {
   sprintf(hourStr, "%d", hour12);
   sprintf(minStr, "%02d", min);
 
-  int hourW = sdfTextWidth(InterBold, hourStr, FONT_PX_CLOCK_DIGITS);
+  int hourW = sdfTabularDigitsWidth(InterBold, strlen(hourStr), FONT_PX_CLOCK_DIGITS);
   int colonW = 50;
-  int minW = sdfTextWidth(InterBold, minStr, FONT_PX_CLOCK_DIGITS);
+  int minW = sdfTabularDigitsWidth(InterBold, strlen(minStr), FONT_PX_CLOCK_DIGITS);
   int totalW = hourW + colonW + minW;
   int xStart = (SCREEN_W - totalW) / 2;
   int yPos = SCREEN_H / 2 + 60;  // baseline position
 
-  sdfDrawText(epaper, InterBold, xStart, yPos, hourStr, FONT_PX_CLOCK_DIGITS, 1.0f, TFT_WHITE);
+  sdfDrawTabularDigits(epaper, InterBold, xStart, yPos, hourStr, FONT_PX_CLOCK_DIGITS, 1.0f, TFT_WHITE);
 
   // Colon as two filled circles, centered on digit height
   int colonX = xStart + hourW + colonW / 2;
@@ -604,7 +604,7 @@ void drawNightClock() {
   epaper.fillCircle(colonX, colonCenter - dotSpacing, dotR, TFT_WHITE);
   epaper.fillCircle(colonX, colonCenter + dotSpacing, dotR, TFT_WHITE);
 
-  sdfDrawText(epaper, InterBold, xStart + hourW + colonW, yPos, minStr, FONT_PX_CLOCK_DIGITS, 1.0f, TFT_WHITE);
+  sdfDrawTabularDigits(epaper, InterBold, xStart + hourW + colonW, yPos, minStr, FONT_PX_CLOCK_DIGITS, 1.0f, TFT_WHITE);
 
   drawNightCaption(SCREEN_W / 2, yPos + 45, haveTime ? WEEKDAY_NAMES[wday] : "", ampm);
 }
@@ -1046,6 +1046,14 @@ void setup() {
   // ota_health.h for what this detects/enforces.
   otaHealth.begin();
   otaHealth.checkBootHealth();
+
+  // The firmware that just landed (or was just rolled back to) may render the
+  // clock face differently than whatever's still on the panel from the last
+  // wake cycle — force a full refresh instead of a partial one so that change
+  // doesn't show up as ghosting.
+  if (otaHealth.versionChangedThisBoot()) {
+    partialRefreshCount = 0;
+  }
 
   loadLocationConfig();
 
