@@ -97,6 +97,24 @@
     border-radius: 4px;
     font-size: 0.85em;
   }
+  #log {
+    margin: 0;
+    max-height: 220px;
+    overflow-y: auto;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .log-tx { color: var(--accent); }
+  .log-rx { color: var(--ok); }
+  .log-meta { color: var(--muted); }
+  .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .panel-head h2 { font-size: 0.85rem; margin: 0; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+  .panel-head button { padding: 4px 10px; font-size: 0.8rem; }
 </style>
 </head>
 <body>
@@ -140,6 +158,14 @@
 
     <p id="saveResult" class="status-line"></p>
   </div>
+
+  <div id="logPanel" class="panel hidden">
+    <div class="panel-head">
+      <h2>Serial log</h2>
+      <button id="clearLogBtn">Clear</button>
+    </div>
+    <pre id="log"></pre>
+  </div>
 </main>
 
 <script>
@@ -154,6 +180,34 @@
   const geoBtn = document.getElementById('geoBtn');
   const saveBtn = document.getElementById('saveBtn');
   const saveResult = document.getElementById('saveResult');
+  const logPanel = document.getElementById('logPanel');
+  const logEl = document.getElementById('log');
+  const clearLogBtn = document.getElementById('clearLogBtn');
+
+  function log(dir, text) {
+    const time = new Date().toLocaleTimeString();
+    const cls = dir === 'TX' ? 'log-tx' : dir === 'RX' ? 'log-rx' : 'log-meta';
+    const line = document.createElement('div');
+    line.className = cls;
+    line.textContent = `[${time}] ${dir} ${text}`;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  clearLogBtn.addEventListener('click', () => { logEl.textContent = ''; });
+
+  // Native USB CDC drops and re-enumerates across a reboot (see the "Save to
+  // device" reboot flow below) — reset the UI when that happens instead of
+  // leaving stale "Connected" state around.
+  navigator.serial.addEventListener('disconnect', (e) => {
+    if (e.target !== port) return;
+    log('meta', 'Device disconnected (USB re-enumerated after reboot?)');
+    port = null;
+    setConnState('Device disconnected — reconnect once it finishes rebooting.', 'err');
+    connectBtn.classList.remove('hidden');
+    disconnectBtn.classList.add('hidden');
+    configPanel.classList.add('hidden');
+  });
 
   if (!('serial' in navigator)) {
     document.getElementById('unsupported').classList.remove('hidden');
@@ -188,6 +242,7 @@
         while ((idx = lineBuf.indexOf('\n')) >= 0) {
           const line = lineBuf.slice(0, idx).replace(/\r$/, '');
           lineBuf = lineBuf.slice(idx + 1);
+          if (line.length) log('RX', line);
           if (line.startsWith('>>') && pendingReplyResolve) {
             const resolve = pendingReplyResolve;
             pendingReplyResolve = null;
@@ -209,6 +264,7 @@
       }, timeoutMs);
       pendingReplyResolve = (reply) => { clearTimeout(timer); resolve(reply); };
       try {
+        log('TX', cmd);
         const encoder = new TextEncoder();
         await writer.write(encoder.encode(cmd + '\n'));
       } catch (e) {
@@ -217,6 +273,12 @@
         reject(e);
       }
     });
+  }
+
+  async function sendFireAndForget(cmd) {
+    log('TX', cmd);
+    const encoder = new TextEncoder();
+    await writer.write(encoder.encode(cmd + '\n'));
   }
 
   function parseStatus(reply) {
@@ -256,6 +318,8 @@
       connectBtn.classList.add('hidden');
       disconnectBtn.classList.remove('hidden');
       configPanel.classList.remove('hidden');
+      logPanel.classList.remove('hidden');
+      log('meta', 'Port opened @115200');
       await refreshStatus();
     } catch (e) {
       setConnState('Connection failed: ' + e.message, 'err');
@@ -268,6 +332,7 @@
       if (writer) { writer.releaseLock(); writer = null; }
       if (port) { await port.close().catch(() => {}); port = null; }
     } finally {
+      log('meta', 'Port closed');
       setConnState('Not connected.');
       connectBtn.classList.remove('hidden');
       disconnectBtn.classList.add('hidden');
@@ -308,9 +373,14 @@
     try {
       const reply = await sendCommand(`CFG SET_LOCATION ${lat} ${lon}`);
       if (reply === 'OK SET_LOCATION') {
-        saveResult.textContent = 'Saved — the device will pick it up on the next weather fetch.';
-        saveResult.className = 'status-line ok';
         await refreshStatus();
+        saveResult.textContent = 'Saved — rebooting device to show the clock…';
+        saveResult.className = 'status-line ok';
+        try {
+          await sendFireAndForget('CFG REBOOT');
+        } catch (e) {
+          log('meta', 'Reboot command failed to send: ' + e.message);
+        }
       } else {
         saveResult.textContent = 'Device rejected it: ' + reply;
         saveResult.className = 'status-line err';

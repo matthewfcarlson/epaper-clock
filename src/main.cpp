@@ -168,6 +168,9 @@ void saveLocationConfig(float lat, float lon) {
 // the first-boot awake window (see loop()).
 //   CFG GET_STATUS              -> >>STATUS configured=0|1 lat=<f> lon=<f> fw=<version>
 //   CFG SET_LOCATION <lat> <lon> -> >>OK SET_LOCATION | >>ERR RANGE|PARSE
+//   CFG REBOOT                  -> >>OK REBOOT, then restarts immediately into
+//                                   a normal (non-button) wake cycle instead of
+//                                   waiting out the rest of the maintenance window
 #define PROVISION_LINE_MAX 64
 void handleSerialProvisioning() {
   static char lineBuf[PROVISION_LINE_MAX];
@@ -188,9 +191,9 @@ void handleSerialProvisioning() {
     if (strcmp(lineBuf, "CFG GET_STATUS") == 0) {
       Serial.printf(">>STATUS configured=%d lat=%.4f lon=%.4f fw=%s\n",
                      locationConfigured ? 1 : 0, userLat, userLon, FIRMWARE_VERSION);
-    } else if (strncmp(lineBuf, "CFG SET_LOCATION ", 18) == 0) {
+    } else if (strncmp(lineBuf, "CFG SET_LOCATION ", 17) == 0) {
       float lat, lon;
-      if (sscanf(lineBuf + 18, "%f %f", &lat, &lon) == 2) {
+      if (sscanf(lineBuf + 17, "%f %f", &lat, &lon) == 2) {
         if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
           Serial.println(">>ERR RANGE");
         } else {
@@ -200,6 +203,11 @@ void handleSerialProvisioning() {
       } else {
         Serial.println(">>ERR PARSE");
       }
+    } else if (strcmp(lineBuf, "CFG REBOOT") == 0) {
+      Serial.println(">>OK REBOOT");
+      Serial.flush();
+      delay(100);
+      ESP.restart();
     } else {
       Serial.println(">>ERR UNKNOWN_CMD");
     }
@@ -287,11 +295,14 @@ void drawBatteryIcon(int x, int y, int percent, bool showLabel = true) {
 }
 
 // Draws one word letter-spaced (tracked-out, all-caps look) starting at x,
-// returning the x position immediately after the last letter.
+// returning the x position immediately after the last letter. xScale
+// independently condenses glyph width and letter spacing on top of
+// pixelHeight, so long strings can be shrunk to fit an available width.
 int drawTrackedText(const char *str, int x, int y, const SdfFont &font, int pixelHeight,
-                     int letterSpacing, uint32_t color = TFT_BLACK) {
+                     int letterSpacing, uint32_t color = TFT_BLACK, float xScale = 1.0f) {
   char glyph[5] = {0};
   bool any = false;
+  int scaledSpacing = (int)lroundf(letterSpacing * xScale);
   for (const char *p = str; *p; ) {
     int consumed = 1;
     sdfUtf8Decode(p, &consumed);
@@ -299,16 +310,18 @@ int drawTrackedText(const char *str, int x, int y, const SdfFont &font, int pixe
     glyph[consumed] = '\0';
     p += consumed;
     any = true;
-    sdfDrawTextTL(epaper, font, x, y, glyph, pixelHeight, 1.0f, color);
-    x += sdfTextWidth(font, glyph, pixelHeight) + letterSpacing;
+    sdfDrawTextTL(epaper, font, x, y, glyph, pixelHeight, xScale, color);
+    x += sdfTextWidth(font, glyph, pixelHeight, xScale) + scaledSpacing;
   }
-  return any ? x - letterSpacing : x;
+  return any ? x - scaledSpacing : x;
 }
 
-int trackedTextWidth(const char *str, const SdfFont &font, int pixelHeight, int letterSpacing) {
+int trackedTextWidth(const char *str, const SdfFont &font, int pixelHeight, int letterSpacing,
+                      float xScale = 1.0f) {
   char glyph[5] = {0};
   int w = 0;
   bool any = false;
+  int scaledSpacing = (int)lroundf(letterSpacing * xScale);
   for (const char *p = str; *p; ) {
     int consumed = 1;
     sdfUtf8Decode(p, &consumed);
@@ -316,9 +329,9 @@ int trackedTextWidth(const char *str, const SdfFont &font, int pixelHeight, int 
     glyph[consumed] = '\0';
     p += consumed;
     any = true;
-    w += sdfTextWidth(font, glyph, pixelHeight) + letterSpacing;
+    w += sdfTextWidth(font, glyph, pixelHeight, xScale) + scaledSpacing;
   }
-  return any ? w - letterSpacing : w;
+  return any ? w - scaledSpacing : w;
 }
 
 static const char *WEEKDAY_NAMES[7] = {
@@ -507,9 +520,19 @@ void drawClock(float batteryVoltage) {
     int x = SCREEN_W - marginX - tempW;
     sdfDrawTextTL(epaper, InterBold, x, bottomRowY, tempStr, FONT_PX_LABEL, 1.0f, TFT_BLACK);
   } else if (!locationConfigured) {
+    // Long hint string can outgrow the space left of the right margin once
+    // the (variable-width) date string on the left is accounted for — shrink
+    // it to fit rather than letting it run into the date.
     const char *hint = "PRESS BUTTON + CONNECT USB TO SET LOCATION";
-    int hintW = trackedTextWidth(hint, InterBold, FONT_PX_LABEL, 3);
-    drawTrackedText(hint, SCREEN_W - marginX - hintW, bottomRowY, InterBold, FONT_PX_LABEL, 3);
+    const int hintLetterSpacing = 3;
+    const int gap = 20;
+    int dateW = trackedTextWidth(dateStr, InterBold, FONT_PX_LABEL, 3);
+    int maxHintW = (SCREEN_W - marginX * 2) - dateW - gap;
+    int hintW = trackedTextWidth(hint, InterBold, FONT_PX_LABEL, hintLetterSpacing);
+    float hintScale = (maxHintW > 0 && hintW > maxHintW) ? (float)maxHintW / (float)hintW : 1.0f;
+    hintW = trackedTextWidth(hint, InterBold, FONT_PX_LABEL, hintLetterSpacing, hintScale);
+    drawTrackedText(hint, SCREEN_W - marginX - hintW, bottomRowY, InterBold, FONT_PX_LABEL,
+                     hintLetterSpacing, TFT_BLACK, hintScale);
   }
 }
 
