@@ -1047,6 +1047,14 @@ void setup() {
   otaHealth.begin();
   otaHealth.checkBootHealth();
 
+  // The firmware that just landed (or was just rolled back to) may render the
+  // clock face differently than whatever's still on the panel from the last
+  // wake cycle — force a full refresh instead of a partial one so that change
+  // doesn't show up as ghosting.
+  if (otaHealth.versionChangedThisBoot()) {
+    partialRefreshCount = 0;
+  }
+
   loadLocationConfig();
 
   wakeCount++;
