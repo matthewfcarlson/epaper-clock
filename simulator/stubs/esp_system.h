@@ -1,8 +1,13 @@
 #pragma once
 
 // Minimal stand-in for ESP-IDF's esp_system.h — just enough for ota_health.cpp's
-// reset-reason logging. The simulator has no real reset history, so it always
-// reports a plain power-on.
+// reset-reason logging and main.cpp's "force an OTA check on any non-deep-sleep
+// startup" gate (see freshStart in setup()). The simulator has no real reset
+// history, so it approximates: ESP_RST_POWERON for the process's first boot,
+// then ESP_RST_DEEPSLEEP for every iteration after its first
+// esp_deep_sleep_start() call (see g_has_deep_slept in stubs/esp_sleep.h) —
+// enough to exercise both branches of that gate, though it can't distinguish
+// a real reset/watchdog/brownout from a fresh flash the way hardware can.
 
 typedef enum {
     ESP_RST_UNKNOWN,
@@ -21,4 +26,7 @@ typedef enum {
 typedef int esp_err_t;
 #define ESP_OK 0
 
-inline esp_reset_reason_t esp_reset_reason() { return ESP_RST_POWERON; }
+extern bool g_has_deep_slept;
+inline esp_reset_reason_t esp_reset_reason() {
+    return g_has_deep_slept ? ESP_RST_DEEPSLEEP : ESP_RST_POWERON;
+}

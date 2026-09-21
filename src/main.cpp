@@ -15,6 +15,7 @@
 #include <HTTPClient.h>
 #include <Update.h>
 #include <Preferences.h>
+#include <esp_system.h>
 #include <time.h>
 #include "config.h"
 #include "version.h"
@@ -1024,10 +1025,12 @@ bool downloadAndFlashFirmware(const String &url) {
 // return in that case. otaHealth (see ota_health.h) tracks the pending
 // version across the reboot and rolls back automatically if it never
 // manages to confirm itself healthy.
-// forceCheck bypasses the night-window and check-interval gates (used on the
-// very first wake after flashing, so a device doesn't have to wait for the
-// next night window to pick up a newer release) but still honors
-// OTA_UPDATES_ENABLED and the already-failed-version skip below.
+// forceCheck bypasses the night-window and check-interval gates (used on any
+// boot that isn't a resume from our own deep sleep — see the freshStart
+// check at the call site — so a device doesn't have to wait for the next
+// night window to pick up a newer release after a flash, a reset, or a
+// crash/watchdog recovery) but still honors OTA_UPDATES_ENABLED and the
+// already-failed-version skip below.
 void checkForFirmwareUpdate(bool forceCheck = false) {
   if (!OTA_UPDATES_ENABLED) return;
 
@@ -1270,7 +1273,14 @@ void setup() {
     epaper.update();
     maintenanceStartedAt = millis();
   } else {
-    checkForFirmwareUpdate(!hasSleptOnce);  // may flash new firmware and reboot; does not return in that case
+    // Force the check on any boot that didn't resume from our own deep
+    // sleep — a fresh flash, a manual reset-button/EN-pin press, ESP.restart()
+    // (e.g. the CFG REBOOT provisioning command), a watchdog/panic recovery,
+    // a brownout, etc. — rather than only on the device's very first-ever
+    // boot. A normal periodic wake reports ESP_RST_DEEPSLEEP here and stays
+    // on the usual night-window/24h-throttle gate.
+    bool freshStart = (esp_reset_reason() != ESP_RST_DEEPSLEEP);
+    checkForFirmwareUpdate(freshStart);  // may flash new firmware and reboot; does not return in that case
     lastVoltage = voltage;
     drawClockForCurrentTime(lastVoltage);
     refreshClockDisplay();
