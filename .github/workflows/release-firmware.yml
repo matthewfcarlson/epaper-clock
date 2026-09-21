@@ -40,23 +40,31 @@ jobs:
       # config.h is gitignored, so the release build assembles it from repo
       # secrets instead of the CI job's placeholder values — this .bin is
       # what devices actually self-flash via the nightly OTA check.
-      # WIFI_SSID/WIFI_PASS are deliberately left blank here rather than
-      # pulled from secrets: this release is a public download, and baking a
-      # real network's credentials into a binary anyone can pull apart with
-      # `strings` would leak them. WiFi is provisioned at runtime over USB
-      # serial instead (see docs/provision.html / CLAUDE.md's "Location &
-      # WiFi provisioning") and persists in NVS across every future OTA
-      # update, independent of what any given release compiles in.
+      #
+      # TEMPORARY, ONE RELEASE ONLY: WIFI_SSID/WIFI_PASS are still pulled
+      # from secrets here so that devices auto-updating from pre-provisioning
+      # firmware can migrate those compiled-in credentials into NVS on first
+      # boot (see the one-time migration in setup(), src/main.cpp, right
+      # after loadWifiConfig()) — that's the only way they get in without
+      # manual serial provisioning. Once this release has rolled out to your
+      # device(s) (check the device's WiFi is showing as NVS-configured, e.g.
+      # via `CFG GET_STATUS`'s wifi=1), flip WIFI_SSID/WIFI_PASS below back
+      # to "" and ship the next release — NVS will already hold the real
+      # credentials by then, so nothing breaks, and the binary stops
+      # containing a real network's credentials at all (see docs/
+      # provision.html / CLAUDE.md's "Location & WiFi provisioning").
       - name: Write config.h from secrets
         env:
+          WIFI_SSID: ${{ secrets.WIFI_SSID }}
+          WIFI_PASS: ${{ secrets.WIFI_PASS }}
           TZ_INFO: ${{ secrets.TZ_INFO }}
           OWM_API_KEY: ${{ secrets.OWM_API_KEY }}
         run: |
           repo_name="${GITHUB_REPOSITORY#*/}"
           cat > src/config.h <<EOF
           #pragma once
-          const char *WIFI_SSID = "";
-          const char *WIFI_PASS = "";
+          const char *WIFI_SSID = "$WIFI_SSID";
+          const char *WIFI_PASS = "$WIFI_PASS";
           const char *TZ_INFO = "$TZ_INFO";
           const char *NTP_SERVER1 = "pool.ntp.org";
           const char *NTP_SERVER2 = "time.nist.gov";

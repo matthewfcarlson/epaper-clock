@@ -1143,6 +1143,21 @@ void setup() {
   loadLocationConfig();
   loadWifiConfig();
 
+  // One-time migration: a device updating from older firmware that had real
+  // WiFi credentials compiled in lands here with NVS still unconfigured.
+  // Capture the compiled-in fallback into NVS now, while this release still
+  // carries it, so a future release can blank out WIFI_SSID/WIFI_PASS
+  // without stranding this device (see "TEMPORARY, ONE RELEASE ONLY" in
+  // release-firmware.yml and "Location & WiFi provisioning" in CLAUDE.md).
+  // Self-limiting: once wifiConfigured is true this never runs again, and a
+  // build with a blank compiled-in SSID (the eventual steady state) has
+  // nothing to migrate.
+  if (!wifiConfigured && WIFI_SSID[0] != '\0') {
+    Serial.println("Migrating compiled-in WiFi credentials to NVS");
+    saveWifiSsid(WIFI_SSID);
+    saveWifiPass(WIFI_PASS);
+  }
+
   wakeCount++;
   Serial.printf("Wake #%u\n", wakeCount);
 
