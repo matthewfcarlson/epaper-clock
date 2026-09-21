@@ -943,16 +943,20 @@ bool downloadAndFlashFirmware(const String &url) {
 // return in that case. otaHealth (see ota_health.h) tracks the pending
 // version across the reboot and rolls back automatically if it never
 // manages to confirm itself healthy.
-void checkForFirmwareUpdate() {
+// forceCheck bypasses the night-window and check-interval gates (used on the
+// very first wake after flashing, so a device doesn't have to wait for the
+// next night window to pick up a newer release) but still honors
+// OTA_UPDATES_ENABLED and the already-failed-version skip below.
+void checkForFirmwareUpdate(bool forceCheck = false) {
   if (!OTA_UPDATES_ENABLED) return;
 
   struct tm nowTm;
   if (!getLocalTime(&nowTm, 100)) return;
   bool isNight = isNightHour(nowTm.tm_hour);
-  if (!isNight) return;
+  if (!isNight && !forceCheck) return;
 
   time_t nowEpoch = time(nullptr);
-  if (lastOtaCheckTime != 0 && (nowEpoch - lastOtaCheckTime) < OTA_CHECK_INTERVAL_S) return;
+  if (!forceCheck && lastOtaCheckTime != 0 && (nowEpoch - lastOtaCheckTime) < OTA_CHECK_INTERVAL_S) return;
   lastOtaCheckTime = nowEpoch;
 
   if (WiFi.status() != WL_CONNECTED) {
@@ -1169,7 +1173,7 @@ void setup() {
     epaper.update();
     maintenanceStartedAt = millis();
   } else {
-    checkForFirmwareUpdate();  // may flash new firmware and reboot; does not return in that case
+    checkForFirmwareUpdate(!hasSleptOnce);  // may flash new firmware and reboot; does not return in that case
     lastVoltage = voltage;
     drawClockForCurrentTime(lastVoltage);
     refreshClockDisplay();
