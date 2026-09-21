@@ -154,6 +154,51 @@ static inline int sdfTextWidth(const SdfFont &f, const char *str, int pixelHeigh
   return (int)lroundf(w);
 }
 
+// Widest advance among '0'-'9' in this font, at its baked em size (i.e. the
+// scale a caller applies separately via pixelHeight/xScale below).
+static inline float sdfDigitCellAdvance(const SdfFont &f) {
+  float maxAdv = 0;
+  for (char c = '0'; c <= '9'; c++) {
+    const SdfGlyph *g = sdfFindGlyph(f, (uint32_t)c);
+    if (g && g->advance > maxAdv) maxAdv = g->advance;
+  }
+  return maxAdv;
+}
+
+// Like sdfDrawText, but for a string of digits only: every glyph gets the
+// same advance (the font's widest digit) instead of its own natural advance,
+// and is centered within that fixed-width cell. A proportional font's actual
+// per-digit widths (e.g. Inter's '1' vs '8') otherwise make a digit string's
+// total width - and therefore any layout computed from it - change with
+// whichever digits happen to be shown, shifting/rescaling the whole clock
+// face on nearly every wake. On e-paper, where a partial refresh already
+// struggles to fully flip every changed pixel, that extra churn (moving
+// pixels that didn't need to move) is what shows up as visible grain/
+// ghosting, so the clock digits keep a fixed pixel grid across draws instead.
+template <typename EPaperT>
+static int sdfDrawTabularDigits(EPaperT &d, const SdfFont &f, int x, int baselineY, const char *digits,
+                                 int pixelHeight, float xScale, uint32_t color) {
+  float scaleY = (float)pixelHeight / (float)f.emPx;
+  float scaleX = scaleY * xScale;
+  float cellAdvance = sdfDigitCellAdvance(f);
+  int penX = x;
+  for (const char *p = digits; *p; p++) {
+    const SdfGlyph *g = sdfFindGlyph(f, (uint32_t)(uint8_t)*p);
+    if (g) {
+      int glyphX = penX + (int)lroundf((cellAdvance - g->advance) * 0.5f * scaleX);
+      sdfDrawGlyph(d, f, *g, glyphX, baselineY, scaleX, scaleY, color);
+    }
+    penX += (int)lroundf(cellAdvance * scaleX);
+  }
+  return penX;
+}
+
+static inline int sdfTabularDigitsWidth(const SdfFont &f, int numDigits, int pixelHeight, float xScale = 1.0f) {
+  float scaleY = (float)pixelHeight / (float)f.emPx;
+  float scaleX = scaleY * xScale;
+  return (int)lroundf(sdfDigitCellAdvance(f) * numDigits * scaleX);
+}
+
 // Convenience wrappers matching TFT_eSPI's top-left / top-center text
 // datum, since that's the convention every call site in main.cpp was
 // written against (drawString/drawCentreString default to TL/TC datum).
