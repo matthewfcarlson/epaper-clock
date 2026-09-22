@@ -29,9 +29,10 @@
 #undef  PROVISION_LISTEN_MS
 #define PROVISION_LISTEN_MS 0
 
-// Globals declared extern in esp_sleep.h
+// Globals declared extern in esp_sleep.h / esp_system.h
 bool     g_sleep_requested = false;
 uint64_t g_sleep_us        = 0;
+bool     g_has_deep_slept  = false;
 
 // Include the sketch as a C++ translation unit.
 // Relative #includes inside main.cpp (config.h, version.h, BigDigits.h)

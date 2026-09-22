@@ -15,6 +15,7 @@
 #include <HTTPClient.h>
 #include <Update.h>
 #include <Preferences.h>
+#include <esp_system.h>
 #include <time.h>
 #include "config.h"
 #include "version.h"
@@ -160,18 +161,72 @@ void saveLocationConfig(float lat, float lon) {
   locationConfigured = true;
 }
 
+// User-provisioned WiFi credentials, same NVS namespace/rationale as
+// location above. Takes priority over the compiled-in WIFI_SSID/WIFI_PASS
+// (config.h) when set — this is what lets the public release binary ship
+// without a real network's credentials baked in (see "Location & WiFi
+// provisioning" in CLAUDE.md): a fresh device falls back to config.h just
+// long enough to be provisioned once over USB serial, and every release
+// after that carries no real credentials at all.
+char userWifiSsid[33] = "";
+char userWifiPass[65] = "";
+bool wifiConfigured = false;
+
+void loadWifiConfig() {
+  prefs.begin("clockcfg", true);
+  wifiConfigured = prefs.getBool("wifi_set", false);
+  String ssid = prefs.getString("ssid", "");
+  String pass = prefs.getString("pass", "");
+  prefs.end();
+  strncpy(userWifiSsid, ssid.c_str(), sizeof(userWifiSsid) - 1);
+  userWifiSsid[sizeof(userWifiSsid) - 1] = '\0';
+  strncpy(userWifiPass, pass.c_str(), sizeof(userWifiPass) - 1);
+  userWifiPass[sizeof(userWifiPass) - 1] = '\0';
+}
+
+void saveWifiSsid(const char *ssid) {
+  prefs.begin("clockcfg", false);
+  prefs.putBool("wifi_set", true);
+  prefs.putString("ssid", ssid);
+  prefs.end();
+  strncpy(userWifiSsid, ssid, sizeof(userWifiSsid) - 1);
+  userWifiSsid[sizeof(userWifiSsid) - 1] = '\0';
+  wifiConfigured = true;
+}
+
+void saveWifiPass(const char *pass) {
+  prefs.begin("clockcfg", false);
+  prefs.putString("pass", pass);
+  prefs.end();
+  strncpy(userWifiPass, pass, sizeof(userWifiPass) - 1);
+  userWifiPass[sizeof(userWifiPass) - 1] = '\0';
+}
+
+// The credentials connectWiFi() should actually use: NVS-provisioned ones
+// once set, otherwise whatever's compiled into config.h (empty on the
+// public release build, possibly real for a local dev build).
+const char *activeWifiSsid() { return wifiConfigured ? userWifiSsid : WIFI_SSID; }
+const char *activeWifiPass() { return wifiConfigured ? userWifiPass : WIFI_PASS; }
+bool wifiCredentialsAvailable() { return activeWifiSsid()[0] != '\0'; }
+
 // Non-blocking line-based provisioning protocol over the same USB serial
 // connection used for flashing/monitoring. Commands from the browser are
 // prefixed "CFG ", replies are prefixed ">>" so a Web Serial client can
 // filter protocol lines out of ordinary Serial.print debug output on the
 // same stream. Only active during the button-wake maintenance window and
 // the first-boot awake window (see loop()).
-//   CFG GET_STATUS              -> >>STATUS configured=0|1 lat=<f> lon=<f> fw=<version>
+//   CFG GET_STATUS              -> >>STATUS configured=0|1 lat=<f> lon=<f> fw=<version> wifi=0|1
 //   CFG SET_LOCATION <lat> <lon> -> >>OK SET_LOCATION | >>ERR RANGE|PARSE
+//   CFG GET_WIFI_SSID           -> >>WIFI_SSID <ssid>  (blank when unset)
+//   CFG SET_WIFI_SSID <ssid>    -> >>OK SET_WIFI_SSID | >>ERR RANGE
+//   CFG SET_WIFI_PASS <pass>    -> >>OK SET_WIFI_PASS | >>ERR RANGE
+//     SSID/password take the rest of the line verbatim (spaces allowed),
+//     which is why they're separate commands rather than sharing one line
+//     like SET_LOCATION's two floats.
 //   CFG REBOOT                  -> >>OK REBOOT, then restarts immediately into
 //                                   a normal (non-button) wake cycle instead of
 //                                   waiting out the rest of the maintenance window
-#define PROVISION_LINE_MAX 64
+#define PROVISION_LINE_MAX 96
 void handleSerialProvisioning() {
   static char lineBuf[PROVISION_LINE_MAX];
   static size_t lineLen = 0;
@@ -189,8 +244,8 @@ void handleSerialProvisioning() {
     if (lineBuf[0] == '\0') continue;
 
     if (strcmp(lineBuf, "CFG GET_STATUS") == 0) {
-      Serial.printf(">>STATUS configured=%d lat=%.4f lon=%.4f fw=%s\n",
-                     locationConfigured ? 1 : 0, userLat, userLon, FIRMWARE_VERSION);
+      Serial.printf(">>STATUS configured=%d lat=%.4f lon=%.4f fw=%s wifi=%d\n",
+                     locationConfigured ? 1 : 0, userLat, userLon, FIRMWARE_VERSION, wifiConfigured ? 1 : 0);
     } else if (strncmp(lineBuf, "CFG SET_LOCATION ", 17) == 0) {
       float lat, lon;
       if (sscanf(lineBuf + 17, "%f %f", &lat, &lon) == 2) {
@@ -202,6 +257,24 @@ void handleSerialProvisioning() {
         }
       } else {
         Serial.println(">>ERR PARSE");
+      }
+    } else if (strcmp(lineBuf, "CFG GET_WIFI_SSID") == 0) {
+      Serial.printf(">>WIFI_SSID %s\n", wifiConfigured ? userWifiSsid : "");
+    } else if (strncmp(lineBuf, "CFG SET_WIFI_SSID ", sizeof("CFG SET_WIFI_SSID ") - 1) == 0) {
+      const char *ssid = lineBuf + (sizeof("CFG SET_WIFI_SSID ") - 1);
+      if (strlen(ssid) == 0 || strlen(ssid) > sizeof(userWifiSsid) - 1) {
+        Serial.println(">>ERR RANGE");
+      } else {
+        saveWifiSsid(ssid);
+        Serial.println(">>OK SET_WIFI_SSID");
+      }
+    } else if (strncmp(lineBuf, "CFG SET_WIFI_PASS ", sizeof("CFG SET_WIFI_PASS ") - 1) == 0) {
+      const char *pass = lineBuf + (sizeof("CFG SET_WIFI_PASS ") - 1);
+      if (strlen(pass) > sizeof(userWifiPass) - 1) {
+        Serial.println(">>ERR RANGE");
+      } else {
+        saveWifiPass(pass);
+        Serial.println(">>OK SET_WIFI_PASS");
       }
     } else if (strcmp(lineBuf, "CFG REBOOT") == 0) {
       Serial.println(">>OK REBOOT");
@@ -364,7 +437,7 @@ void drawMaintenanceScreen() {
   char lineBuf[48];
   snprintf(lineBuf, sizeof(lineBuf), "Listening for %lus...", (unsigned long)(PROVISION_LISTEN_MS / 1000));
   sdfDrawCentreTextTL(epaper, InterRegular, cx, cy + 100, lineBuf, FONT_PX_BODY, 1.0f, TFT_BLACK);
-  sdfDrawCentreTextTL(epaper, InterRegular, cx, cy + 130, "Connect USB + open provision.html to set location",
+  sdfDrawCentreTextTL(epaper, InterRegular, cx, cy + 130, "Connect USB + open provision.html to configure",
                        FONT_PX_BODY, 1.0f, TFT_BLACK);
 
   snprintf(lineBuf, sizeof(lineBuf), "fw %s", FIRMWARE_VERSION);
@@ -519,11 +592,12 @@ void drawClock(float batteryVoltage) {
     int tempW = sdfTextWidth(InterBold, tempStr, FONT_PX_LABEL);
     int x = SCREEN_W - marginX - tempW;
     sdfDrawTextTL(epaper, InterBold, x, bottomRowY, tempStr, FONT_PX_LABEL, 1.0f, TFT_BLACK);
-  } else if (!locationConfigured) {
+  } else if (!locationConfigured || !wifiCredentialsAvailable()) {
     // Long hint string can outgrow the space left of the right margin once
     // the (variable-width) date string on the left is accounted for — shrink
     // it to fit rather than letting it run into the date.
-    const char *hint = "PRESS BUTTON + CONNECT USB TO SET LOCATION";
+    const char *hint = !wifiCredentialsAvailable() ? "PRESS BUTTON + CONNECT USB TO SET UP WIFI"
+                                                    : "PRESS BUTTON + CONNECT USB TO SET LOCATION";
     const int hintLetterSpacing = 3;
     const int gap = 20;
     int dateW = trackedTextWidth(dateStr, InterBold, FONT_PX_LABEL, 3);
@@ -666,6 +740,14 @@ uint64_t getSleepDuration() {
 #endif
 
 void connectWiFi() {
+  if (!wifiCredentialsAvailable()) {
+    Serial.println("No WiFi credentials provisioned — skipping connect");
+    return;
+  }
+
+  const char *ssid = activeWifiSsid();
+  const char *pass = activeWifiPass();
+
   Serial.print("Connecting to WiFi");
   WiFi.mode(WIFI_STA);
   WiFi.setTxPower(WIFI_TX_POWER);
@@ -673,9 +755,9 @@ void connectWiFi() {
   // Skip the AP scan phase when we already know the channel/BSSID from a
   // prior successful connect this charge cycle.
   if (wifiBssidValid) {
-    WiFi.begin(WIFI_SSID, WIFI_PASS, wifiChannel, wifiBssid);
+    WiFi.begin(ssid, pass, wifiChannel, wifiBssid);
   } else {
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    WiFi.begin(ssid, pass);
   }
 
   unsigned long start = millis();
@@ -943,16 +1025,22 @@ bool downloadAndFlashFirmware(const String &url) {
 // return in that case. otaHealth (see ota_health.h) tracks the pending
 // version across the reboot and rolls back automatically if it never
 // manages to confirm itself healthy.
-void checkForFirmwareUpdate() {
+// forceCheck bypasses the night-window and check-interval gates (used on any
+// boot that isn't a resume from our own deep sleep — see the freshStart
+// check at the call site — so a device doesn't have to wait for the next
+// night window to pick up a newer release after a flash, a reset, or a
+// crash/watchdog recovery) but still honors OTA_UPDATES_ENABLED and the
+// already-failed-version skip below.
+void checkForFirmwareUpdate(bool forceCheck = false) {
   if (!OTA_UPDATES_ENABLED) return;
 
   struct tm nowTm;
   if (!getLocalTime(&nowTm, 100)) return;
   bool isNight = isNightHour(nowTm.tm_hour);
-  if (!isNight) return;
+  if (!isNight && !forceCheck) return;
 
   time_t nowEpoch = time(nullptr);
-  if (lastOtaCheckTime != 0 && (nowEpoch - lastOtaCheckTime) < OTA_CHECK_INTERVAL_S) return;
+  if (!forceCheck && lastOtaCheckTime != 0 && (nowEpoch - lastOtaCheckTime) < OTA_CHECK_INTERVAL_S) return;
   lastOtaCheckTime = nowEpoch;
 
   if (WiFi.status() != WL_CONNECTED) {
@@ -1056,6 +1144,22 @@ void setup() {
   }
 
   loadLocationConfig();
+  loadWifiConfig();
+
+  // One-time migration: a device updating from older firmware that had real
+  // WiFi credentials compiled in lands here with NVS still unconfigured.
+  // Capture the compiled-in fallback into NVS now, while this release still
+  // carries it, so a future release can blank out WIFI_SSID/WIFI_PASS
+  // without stranding this device (see "TEMPORARY, ONE RELEASE ONLY" in
+  // release-firmware.yml and "Location & WiFi provisioning" in CLAUDE.md).
+  // Self-limiting: once wifiConfigured is true this never runs again, and a
+  // build with a blank compiled-in SSID (the eventual steady state) has
+  // nothing to migrate.
+  if (!wifiConfigured && WIFI_SSID[0] != '\0') {
+    Serial.println("Migrating compiled-in WiFi credentials to NVS");
+    saveWifiSsid(WIFI_SSID);
+    saveWifiPass(WIFI_PASS);
+  }
 
   wakeCount++;
   Serial.printf("Wake #%u\n", wakeCount);
@@ -1114,6 +1218,12 @@ void setup() {
   if (needSync) {
     epaper.fillScreen(TFT_WHITE);
     sdfDrawCentreTextTL(epaper, InterBold, SCREEN_W / 2, SCREEN_H / 2 - 12, "Syncing...", FONT_PX_HEADING, 1.0f, TFT_BLACK);
+
+    char fwStr[24];
+    snprintf(fwStr, sizeof(fwStr), "fw %s", FIRMWARE_VERSION);
+    int fwW = sdfTextWidth(InterRegular, fwStr, FONT_PX_BODY);
+    sdfDrawTextTL(epaper, InterRegular, SCREEN_W - 40 - fwW, SCREEN_H - 26 - FONT_PX_BODY, fwStr, FONT_PX_BODY, 1.0f, TFT_BLACK);
+
     epaper.update();
 
     connectWiFi();
@@ -1161,15 +1271,22 @@ void setup() {
   if (wakeReason == ESP_SLEEP_WAKEUP_EXT1) {
     Serial.println("Button wake detected — entering maintenance mode (serial provisioning)");
 
-    // Maintenance mode is serial-only now — location provisioning runs over
-    // USB and doesn't need WiFi. Firmware updates come from the nightly
-    // GitHub-releases check (checkForFirmwareUpdate()), not from here.
+    // Maintenance mode is serial-only now — WiFi/location provisioning runs
+    // over USB and doesn't need WiFi itself. Firmware updates come from the
+    // nightly GitHub-releases check (checkForFirmwareUpdate()), not from here.
     maintenanceMode = true;
     drawMaintenanceScreen();
     epaper.update();
     maintenanceStartedAt = millis();
   } else {
-    checkForFirmwareUpdate();  // may flash new firmware and reboot; does not return in that case
+    // Force the check on any boot that didn't resume from our own deep
+    // sleep — a fresh flash, a manual reset-button/EN-pin press, ESP.restart()
+    // (e.g. the CFG REBOOT provisioning command), a watchdog/panic recovery,
+    // a brownout, etc. — rather than only on the device's very first-ever
+    // boot. A normal periodic wake reports ESP_RST_DEEPSLEEP here and stays
+    // on the usual night-window/24h-throttle gate.
+    bool freshStart = (esp_reset_reason() != ESP_RST_DEEPSLEEP);
+    checkForFirmwareUpdate(freshStart);  // may flash new firmware and reboot; does not return in that case
     lastVoltage = voltage;
     drawClockForCurrentTime(lastVoltage);
     refreshClockDisplay();
