@@ -4,10 +4,20 @@ name: Release firmware
 # with a leading 'v') to build and publish a GitHub release. Devices poll
 # this repo's latest release nightly (see CLAUDE.md's "Firmware auto-update"
 # section) and self-flash when the tag is newer than their running version.
+#
+# Also accepts workflow_dispatch, dispatched against the tag itself (so
+# GITHUB_REF_NAME below still resolves correctly) — tag-release.yml uses this
+# right after pushing a new tag, since a tag pushed with the default
+# GITHUB_TOKEN does NOT trigger other on:push workflows (GitHub's anti-
+# recursion guard exempts workflow_dispatch/repository_dispatch from that,
+# which is why this needs both triggers rather than push alone). It's also
+# handy for manually re-running a build for an existing tag without having
+# to re-push it.
 on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch: {}
 
 permissions:
   # softprops/action-gh-release needs this to create the release and generate
