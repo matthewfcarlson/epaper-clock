@@ -1,0 +1,54 @@
+name: Tag release
+
+# Manually triggered only — shows up as "Run workflow" in the Actions tab of
+# both the web UI and the GitHub mobile app (pick the branch to tag, usually
+# main after merging a version bump), and can be kicked off from a desk too
+# via `gh workflow run tag-release.yml --ref main`. Reads FIRMWARE_VERSION
+# off the selected branch's src/version.h and creates+pushes a matching
+# vX.Y.Z tag — which is all release-firmware.yml needs to build and publish
+# the release, since it already triggers on that tag pattern. This exists
+# because pushing a tag from an interactive/agent session can be blocked by
+# credentials scoped to branches only; a workflow run with the repo's own
+# GITHUB_TOKEN doesn't have that problem.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  # Needed to push the new tag.
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read FIRMWARE_VERSION
+        id: version
+        run: |
+          version="$(grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' src/version.h | tr -d '"')"
+          if [ -z "$version" ]; then
+            echo "::error::Couldn't parse FIRMWARE_VERSION out of src/version.h"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check the tag doesn't already exist
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::Tag $tag already exists on origin — bump FIRMWARE_VERSION in src/version.h first."
+            exit 1
+          fi
+
+      - name: Create and push the tag
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          git tag "$tag"
+          git push origin "$tag"
+
+      - name: Summary
+        run: |
+          echo "Tagged and pushed ${{ steps.version.outputs.tag }} from \`${{ github.ref_name }}\` (${{ github.sha }})." >> "$GITHUB_STEP_SUMMARY"
+          echo "release-firmware.yml should pick it up shortly: https://github.com/${{ github.repository }}/actions/workflows/release-firmware.yml" >> "$GITHUB_STEP_SUMMARY"
