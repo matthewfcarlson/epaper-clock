@@ -101,6 +101,7 @@ Key simulator behaviors vs. real hardware:
 | `src/version.h` | `FIRMWARE_VERSION` — bump and tag a matching GitHub release to ship an update |
 | `src/BigDigits.h` | PROGMEM bitmap data for large digits 0–9 plus `bigDigitsWidth()` / `drawBigDigits()` helpers |
 | `src/ota_health.h` / `src/ota_health.cpp` | `OtaHealth` — bootloader-rollback safety net for the GitHub-releases update path (see "Firmware auto-update" below) |
+| `src/epaper_partial.h` | `EPaperPartial` — adds a real primed partial-refresh path on top of Seeed_GFX's `EPaper` (see "Display" below) |
 
 ### Deep sleep & wake cycle
 
@@ -157,6 +158,12 @@ All drawing calls go through the `EPaper` object (wraps TFT_eSPI, provided by th
 Getting `BOARD_SCREEN_COMBO`/`USE_XIAO_EPAPER_DISPLAY_BOARD_EE04` into Seeed_GFX has to happen via `build_flags`, not a project header: Arduino IDE normally lets a sketch-root `driver.h` reach the library through `__has_include`, because the IDE adds the whole sketch folder to every compiler invocation's include path. PlatformIO's Library Dependency Finder scopes each library's own include path independently, so a project `include/driver.h` is invisible to `Seeed_GFX/TFT_eSPI.cpp` when it's compiled as a library object — only `build_flags`, which PlatformIO applies globally, reliably reach it.
 
 The clock face renders hour/minute using bitmap glyphs from `BigDigits.h` (extracted from FreeSerifBold 160pt, digits only, stored in flash via `PROGMEM`). The colon is drawn as two filled circles. Weather and battery status appear in the bottom corners.
+
+**Partial refresh.** `refreshClockDisplay()` (`src/main.cpp`) does a real partial refresh whenever it safely can, instead of a full flash on every wake. Stock Seeed_GFX can't do this here: `EPaper::update()` (full refresh) pushes both old and new image data from the same buffer, so it never depends on anything surviving between calls, but `EPaper::updataPartial()` only pushes new data and assumes the UC8179 controller's SRAM already holds an accurate old image — untrue in this app, since the panel is put to sleep (`EPD_SLEEP`, which clears that SRAM) after every display write, and the MCU itself deep-sleeps between every wake. Used as-is, `updataPartial()` diffs the new frame against stale/garbage SRAM and corrupts the display immediately rather than merely ghosting it over time.
+
+`src/epaper_partial.h` adds `EPaperPartial : public EPaper`, a small subclass (not a fork — `_img8`/`_width`/`_height` are `protected` in the base class, and the UC8179 command macros are already globally visible via `TFT_eSPI.h`) with one method, `pushPrimedPartial(oldImg)`, that pushes an explicit old-image buffer before the new one and triggers the refresh — full screen only, since this app never does a sub-rectangle update. `refreshClockDisplay()` supplies that old-image buffer by reconstructing the previous wake's actual frame: it persists a `ClockSnapshot` (everything the draw functions read — time, weather, battery, location/WiFi-configured flags) in `RTC_DATA_ATTR` after every refresh, and on the next wake redraws that snapshot into the live sprite, copies it out via `getPointer()`, then draws the real current frame over it before calling `pushPrimedPartial()`. Falls back to a genuine full `update()` (which needs no history) whenever there's no previous snapshot yet, the firmware that drew it isn't this build (different builds can render fonts/layout differently, so a reconstruction drawn by *this* firmware wouldn't match what's physically on the panel), or a 24-hour safety-net interval is due — regardless of correct priming data, an occasional full flash guards against analog drift the panel accumulates on its own.
+
+The simulator has no controller SRAM or waveform to prime, so `EPAPER_SIM_BUILD` (defined by `simulator/Makefile`) selects a trivial stand-in `EPaperPartial` in the same file that just calls `update()` and ignores the priming buffer.
 
 ### Battery
 

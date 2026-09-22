@@ -110,6 +110,35 @@ RTC_DATA_ATTR uint8_t wifiChannel = 0;
 RTC_DATA_ATTR uint8_t wifiBssid[6] = {0, 0, 0, 0, 0, 0};
 RTC_DATA_ATTR bool wifiBssidValid = false;
 
+// Everything the clock face's drawing functions need — captured once per
+// wake so the exact same values can be redrawn later to reconstruct what a
+// past wake's frame looked like (see refreshClockDisplay()). Time fields
+// are already rounded to the 5-minute display cadence.
+struct ClockSnapshot {
+  bool haveTime;
+  int hour, min, wday, mday, mon;
+  bool isNight;
+  float batteryVoltage;
+  bool weatherValid;
+  int weatherHigh, weatherLow;
+  bool locationConfigured;
+  bool wifiCredsAvailable;
+};
+
+// The previous wake's snapshot and whether it's usable to reconstruct a
+// priming frame for partial refresh — see refreshClockDisplay().
+RTC_DATA_ATTR bool havePreviousFrame = false;
+RTC_DATA_ATTR ClockSnapshot previousFrame = {};
+// Firmware version that drew previousFrame — a different build can render
+// fonts/layout differently, so a reconstruction drawn by *this* firmware
+// wouldn't actually match what's physically on the panel if versions differ.
+RTC_DATA_ATTR char previousFrameVersion[16] = "";
+// Even with correct priming data, force an occasional real full refresh as
+// a safety net against analog drift the panel accumulates regardless of
+// what data it's fed — standard e-paper practice.
+RTC_DATA_ATTR time_t lastFullRefreshTime = 0;
+#define FULL_REFRESH_SAFETY_INTERVAL_S (24 * 3600)
+
 // Night window can wrap past midnight (e.g. 23 -> 6), so this can't be a
 // simple range comparison.
 bool isNightHour(int h) {
@@ -282,7 +311,9 @@ void handleSerialProvisioning() {
 
 #ifdef EPAPER_ENABLE
 
-EPaper epaper = EPaper();
+#include "epaper_partial.h"
+
+EPaperPartial epaper = EPaperPartial();
 
 #define SCREEN_W 800
 #define SCREEN_H 480
@@ -459,26 +490,9 @@ int getBatteryPercent(float voltage) {
   return percent;
 }
 
-void drawClock(float batteryVoltage) {
-  struct tm timeinfo;
-  int hour = 0, min = 0, wday = 0, mday = 0, mon = 0;
-  bool haveTime = getLocalTime(&timeinfo, 100);
-
-  if (haveTime) {
-    hour = timeinfo.tm_hour;
-    min = timeinfo.tm_min;
-    wday = timeinfo.tm_wday;
-    mday = timeinfo.tm_mday;
-    mon = timeinfo.tm_mon;
-  }
-
-  // Round the displayed time to the nearest 5-minute mark, matching the
-  // cadence the device actually wakes/updates at.
-  min = ((min + 2) / 5) * 5;
-  if (min >= 60) {
-    min = 0;
-    hour = (hour + 1) % 24;
-  }
+void drawClock(const ClockSnapshot &s) {
+  bool haveTime = s.haveTime;
+  int hour = s.hour, min = s.min, wday = s.wday, mday = s.mday, mon = s.mon;
 
   epaper.fillScreen(TFT_WHITE);
 
@@ -490,7 +504,7 @@ void drawClock(float batteryVoltage) {
   // Battery icon, top-right, icon only (no percentage text) — only shown
   // once it's actually low, so it doesn't clutter the face the rest of the
   // time.
-  int battPercent = getBatteryPercent(batteryVoltage);
+  int battPercent = getBatteryPercent(s.batteryVoltage);
   if (battPercent < 20) {
     drawBatteryIcon(SCREEN_W - marginX - 40, 34, battPercent, false);
   }
@@ -578,19 +592,19 @@ void drawClock(float batteryVoltage) {
 
   // Weather, bottom-right: "<hi>°/<lo>°F", or a setup hint until a location
   // has been provisioned.
-  if (weatherValid) {
+  if (s.weatherValid) {
     char tempStr[16];
-    snprintf(tempStr, sizeof(tempStr), "%d\xC2\xB0/%d\xC2\xB0", weatherHigh, weatherLow);
+    snprintf(tempStr, sizeof(tempStr), "%d\xC2\xB0/%d\xC2\xB0", s.weatherHigh, s.weatherLow);
 
     int tempW = sdfTextWidth(InterBold, tempStr, FONT_PX_LABEL);
     int x = SCREEN_W - marginX - tempW;
     sdfDrawTextTL(epaper, InterBold, x, bottomRowY, tempStr, FONT_PX_LABEL, 1.0f, TFT_BLACK);
-  } else if (!locationConfigured || !wifiCredentialsAvailable()) {
+  } else if (!s.locationConfigured || !s.wifiCredsAvailable) {
     // Long hint string can outgrow the space left of the right margin once
     // the (variable-width) date string on the left is accounted for — shrink
     // it to fit rather than letting it run into the date.
-    const char *hint = !wifiCredentialsAvailable() ? "PRESS BUTTON + CONNECT USB TO SET UP WIFI"
-                                                    : "PRESS BUTTON + CONNECT USB TO SET LOCATION";
+    const char *hint = !s.wifiCredsAvailable ? "PRESS BUTTON + CONNECT USB TO SET UP WIFI"
+                                              : "PRESS BUTTON + CONNECT USB TO SET LOCATION";
     const int hintLetterSpacing = 3;
     const int gap = 20;
     int dateW = trackedTextWidth(dateStr, InterBold, FONT_PX_LABEL, 3);
@@ -625,23 +639,9 @@ void drawNightCaption(int cx, int y, const char *weekdayUpper, const char *ampm)
 // Night-only rendering: dark background, white text, no date/weather/battery
 // — a separate function from drawClock() so day-mode drawing (due for its
 // own refactor) is untouched.
-void drawNightClock() {
-  struct tm timeinfo;
-  int hour = 0, min = 0, wday = 0;
-  bool haveTime = getLocalTime(&timeinfo, 100);
-  if (haveTime) {
-    hour = timeinfo.tm_hour;
-    min = timeinfo.tm_min;
-    wday = timeinfo.tm_wday;
-  }
-
-  // Round the displayed time to the nearest 5-minute mark, matching the
-  // cadence the device actually wakes/updates at.
-  min = ((min + 2) / 5) * 5;
-  if (min >= 60) {
-    min = 0;
-    hour = (hour + 1) % 24;
-  }
+void drawNightClock(const ClockSnapshot &s) {
+  bool haveTime = s.haveTime;
+  int hour = s.hour, min = s.min, wday = s.wday;
 
   epaper.fillScreen(TFT_BLACK);
 
@@ -676,36 +676,89 @@ void drawNightClock() {
   drawNightCaption(SCREEN_W / 2, yPos + 45, haveTime ? WEEKDAY_NAMES[wday] : "", ampm);
 }
 
-// Picks day or night rendering based on the current time and draws the
-// clock face accordingly.
-void drawClockForCurrentTime(float batteryVoltage) {
-  struct tm now;
-  bool isNight = false;
-  if (getLocalTime(&now, 100)) {
-    isNight = isNightHour(now.tm_hour);
+// Captures everything the clock face needs to render "right now," rounded
+// to the 5-minute display cadence — see ClockSnapshot.
+ClockSnapshot captureCurrentSnapshot(float batteryVoltage) {
+  ClockSnapshot s = {};
+  s.batteryVoltage = batteryVoltage;
+
+  struct tm timeinfo;
+  s.haveTime = getLocalTime(&timeinfo, 100);
+  if (s.haveTime) {
+    s.hour = timeinfo.tm_hour;
+    s.min = timeinfo.tm_min;
+    s.wday = timeinfo.tm_wday;
+    s.mday = timeinfo.tm_mday;
+    s.mon = timeinfo.tm_mon;
+    s.isNight = isNightHour(s.hour);
   }
-  if (isNight) {
-    drawNightClock();
+
+  // Round the displayed time to the nearest 5-minute mark, matching the
+  // cadence the device actually wakes/updates at.
+  s.min = ((s.min + 2) / 5) * 5;
+  if (s.min >= 60) {
+    s.min = 0;
+    s.hour = (s.hour + 1) % 24;
+  }
+
+  s.weatherValid = weatherValid;
+  s.weatherHigh = weatherHigh;
+  s.weatherLow = weatherLow;
+  s.locationConfigured = locationConfigured;
+  s.wifiCredsAvailable = wifiCredentialsAvailable();
+  return s;
+}
+
+// Picks day or night rendering based on the snapshot and draws the clock
+// face accordingly.
+void drawSnapshot(const ClockSnapshot &s) {
+  if (s.isNight) {
+    drawNightClock(s);
   } else {
-    drawClock(batteryVoltage);
+    drawClock(s);
   }
 }
 
-// Pushes the drawn clock face to the panel. Always a full refresh: the
-// UC8179 driver's partial-refresh path (Seeed_GFX's updataPartial()) only
-// pushes the new image and relies on old-image comparison data already
-// resident in the panel controller's SRAM. That SRAM does not survive
-// either EPD_SLEEP() (issued at the end of every update/updataPartial call
-// here) or the hardware reset updataPartial() itself issues via
-// EPD_WAKEUP_PARTIAL() when waking a sleeping panel — and since this device
-// deep-sleeps between every wake, both conditions are hit on every single
-// wake. So a partial refresh here always diffs against stale/garbage SRAM
-// instead of the actual previous frame, corrupting the display immediately
-// rather than merely ghosting it over time. epaper.update() sidesteps this
-// entirely by pushing the *current* frame as both old and new, so it never
-// depends on any state surviving between wakes.
-void refreshClockDisplay() {
-  epaper.update();
+// Captures the current state, draws and pushes the clock face to the
+// panel, and records what was drawn for next wake's reconstruction.
+//
+// Does a real partial refresh when it safely can. Stock Seeed_GFX can't do
+// this across a deep-sleep boundary — see epaper_partial.h for the full
+// story — so instead of relying on anything left in the panel controller's
+// SRAM, this reconstructs the exact previous frame from the last wake's
+// persisted snapshot, primes the controller with it, then pushes the real
+// new frame: the controller always gets an accurate old/new pair to diff
+// against, regardless of what happened to it between wakes.
+//
+// Falls back to a genuine full refresh (which manufactures its own
+// old==new baseline via EPaper::update() and needs no history) whenever
+// there's no previous frame to reconstruct, the firmware that drew it
+// isn't this build, or the periodic safety-net interval is due.
+void refreshClockDisplay(float batteryVoltage) {
+  ClockSnapshot current = captureCurrentSnapshot(batteryVoltage);
+
+  time_t nowEpoch = time(nullptr);
+  bool dueForSafetyRefresh =
+      (lastFullRefreshTime == 0) || ((nowEpoch - lastFullRefreshTime) >= FULL_REFRESH_SAFETY_INTERVAL_S);
+  bool canPrime = havePreviousFrame && !dueForSafetyRefresh &&
+                  strcmp(previousFrameVersion, FIRMWARE_VERSION) == 0;
+
+  if (!canPrime) {
+    drawSnapshot(current);
+    epaper.update();
+    lastFullRefreshTime = nowEpoch;
+  } else {
+    static uint8_t oldFrameBuf[SCREEN_W * SCREEN_H / 8];
+    drawSnapshot(previousFrame);
+    memcpy(oldFrameBuf, epaper.getPointer(), sizeof(oldFrameBuf));
+    drawSnapshot(current);
+    epaper.pushPrimedPartial(oldFrameBuf);
+  }
+
+  previousFrame = current;
+  havePreviousFrame = true;
+  strncpy(previousFrameVersion, FIRMWARE_VERSION, sizeof(previousFrameVersion) - 1);
+  previousFrameVersion[sizeof(previousFrameVersion) - 1] = '\0';
 }
 
 uint64_t getSleepDuration() {
@@ -1276,8 +1329,7 @@ void setup() {
     bool freshStart = (esp_reset_reason() != ESP_RST_DEEPSLEEP);
     checkForFirmwareUpdate(freshStart);  // may flash new firmware and reboot; does not return in that case
     lastVoltage = voltage;
-    drawClockForCurrentTime(lastVoltage);
-    refreshClockDisplay();
+    refreshClockDisplay(lastVoltage);
   }
 
   // Reaching here means this wake cycle ran to completion without crashing
@@ -1300,8 +1352,7 @@ void loop() {
       Serial.println("Maintenance listen window expired, drawing clock and going to sleep");
       maintenanceMode = false;
       lastVoltage = readBatteryVoltage();
-      drawClockForCurrentTime(lastVoltage);
-      refreshClockDisplay();
+      refreshClockDisplay(lastVoltage);
       uint64_t sleepDuration = getSleepDuration();
       enterDeepSleep(sleepDuration);
     }

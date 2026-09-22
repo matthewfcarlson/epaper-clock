@@ -193,6 +193,14 @@ public:
         update();
     }
 
+    // Real EPaper::getPointer() (Seeed_GFX) returns the sprite's packed
+    // 1bpp pixel buffer; the sim renders straight to SDL and keeps no such
+    // buffer. main.cpp uses this to snapshot a frame for priming a partial
+    // refresh (see src/epaper_partial.h) — the sim's own partial path
+    // ignores the priming buffer entirely, so this just needs to be a
+    // valid, correctly-sized pointer, not real pixel data.
+    void* getPointer() { return dummyBuf_; }
+
     void cleanup(int code) {
         TTF_Quit();
         if (renderer_) SDL_DestroyRenderer(renderer_);
@@ -208,6 +216,8 @@ private:
     uint32_t      textColor_ = TFT_BLACK;
     int           textScale_ = 1;
     const GFXfont *freeFont_ = nullptr;
+
+    uint8_t       dummyBuf_[SCREEN_W * SCREEN_H / 8] = {};
 
     std::string exportBase_;    // full original path, e.g. "clock.jpg"
     std::string exportStem_;    // without extension, e.g. "clock"
