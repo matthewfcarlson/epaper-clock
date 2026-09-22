@@ -114,5 +114,12 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          # Explicit rather than left to infer from GITHUB_REF: on a
+          # workflow_dispatch run GITHUB_REF is whatever branch the workflow
+          # was dispatched against (main, per tag-release.yml's --ref main),
+          # not the tag named in the `tag` input — action-gh-release would
+          # otherwise fail with "GitHub Releases requires a tag" since main
+          # isn't a tag ref at all.
+          tag_name: ${{ steps.target.outputs.tag }}
           files: firmware.bin
           generate_release_notes: true
