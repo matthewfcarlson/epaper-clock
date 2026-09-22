@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XIAO ePaper Clock</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f4;
+    --panel: #ffffff;
+    --text: #1c1c1c;
+    --muted: #666;
+    --border: #ddd;
+    --accent: #2563eb;
+    --accent-text: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181a;
+      --panel: #232427;
+      --text: #eaeaea;
+      --muted: #9a9a9a;
+      --border: #3a3b3e;
+      --accent: #3b82f6;
+      --accent-text: #0b0b0b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  main { width: 100%; max-width: 560px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: 0.95rem; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  h2.section { font-size: 0.85rem; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+  p { margin: 0 0 12px; }
+  p:last-child { margin-bottom: 0; }
+  ol, ul { margin: 0 0 12px; padding-left: 1.3em; }
+  ol:last-child, ul:last-child { margin-bottom: 0; }
+  li { margin-bottom: 6px; }
+  li:last-child { margin-bottom: 0; }
+  a { color: var(--accent); }
+  code {
+    background: var(--bg);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+  .cta {
+    display: inline-block;
+    padding: 12px 20px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--accent-text);
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.95rem;
+  }
+  .cta-wrap { text-align: center; padding: 24px 20px; }
+  .cta-hint { display: block; margin-top: 10px; font-size: 0.8rem; color: var(--muted); }
+  .browser-note {
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+  footer { text-align: center; color: var(--muted); font-size: 0.8rem; margin-top: 8px; }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>XIAO ePaper Clock</h1>
+  <p class="sub">A battery-powered 7.5&Prime; e-paper desk clock built on a Seeed Studio XIAO ESP32S3, with weather and self-updating firmware.</p>
+
+  <div class="panel">
+    <h2 class="section">What this is</h2>
+    <p>
+      Open-source firmware for a large-digit e-paper clock: it syncs time over NTP, shows local
+      weather from OpenWeatherMap, and sleeps between updates to stretch a single-cell LiPo battery
+      for weeks. The display only redraws every few minutes, so there's no backlight and no flicker
+      &mdash; it looks like a printed page until the time changes.
+    </p>
+    <p>
+      The firmware checks GitHub Releases for new versions on its own and flashes itself overnight,
+      so a device out on a desk somewhere stays current without ever being plugged into a computer
+      again after the first setup.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2 class="section">Setting up a device</h2>
+    <p>WiFi and the weather location aren't baked into the firmware &mdash; each device is configured once over USB:</p>
+    <ol>
+      <li>Press a button on the device (any of the three) to enter its maintenance window.</li>
+      <li>Plug it into a computer with a USB cable.</li>
+      <li>Open the setup page below in Chrome or Edge, connect to the device, and enter WiFi + location.</li>
+    </ol>
+  </div>
+
+  <div class="panel cta-wrap">
+    <a class="cta" href="provision.html">Open the setup page &rarr;</a>
+    <span class="cta-hint">Uses the Web Serial API &mdash; Chrome or Edge on desktop only, no Safari or iOS.</span>
+  </div>
+
+  <div class="panel">
+    <h2 class="section">Source</h2>
+    <p>
+      Firmware, hardware notes, and build instructions live in the
+      <a href="https://github.com/matthewfcarlson/epaper-clock">GitHub repository</a>.
+      It's an Arduino/PlatformIO project targeting the Seeed Studio XIAO ESP32S3 Plus driving a
+      TRMNL-style 7.5&Prime; UC8179 e-paper panel.
+    </p>
+  </div>
+
+  <footer>
+    <a href="https://github.com/matthewfcarlson/epaper-clock">github.com/matthewfcarlson/epaper-clock</a>
+  </footer>
+</main>
+</body>
+</html>
