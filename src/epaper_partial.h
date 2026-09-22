@@ -17,18 +17,16 @@
 // refreshClockDisplay() in main.cpp for the full story and why plain
 // updataPartial() corrupts the display instead of merely ghosting it.
 //
-// EPAPER_SIM_BUILD (defined by simulator/Makefile) selects a trivial stand-in
-// instead: the simulator has no controller SRAM or waveform to prime, and
-// renders straight to SDL rather than through Seeed_GFX/TFT_eSPI at all, so
-// none of the real implementation below is even meaningful there.
+// EPAPER_SIM_BUILD (defined by simulator/Makefile) pulls in a simulated
+// EPaperPartial instead: the real one below talks to actual UC8179
+// controller SRAM the simulator doesn't have, but simulator/EPaperGhostSim.h
+// models that SRAM (and its loss on sleep) well enough to catch a real
+// priming bug — a mismatch between what main.cpp reconstructs and what's
+// actually shown renders as visible noise in exported/displayed frames,
+// instead of silently doing the right thing anyway.
 #ifdef EPAPER_SIM_BUILD
 
-class EPaperPartial : public EPaper {
-public:
-    void pushPrimedPartial(const uint8_t* /*oldImg*/) {
-        update();
-    }
-};
+#include "../simulator/EPaperGhostSim.h"
 
 #else
 
