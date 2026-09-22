@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include <time.h>
 
 /**
  * OTA rollback safety net for the GitHub-releases auto-update path (see
@@ -48,11 +49,33 @@ public:
     // of setup() without crashing/hanging). No-op if no OTA is pending confirmation.
     void confirmHealthy();
 
+    // Durable (NVS-backed, survives power loss) record of the most recent OTA
+    // failure, for surfacing to the user (clock-face hint, serial CFG protocol,
+    // docs/provision.html) — see "OTA failure reporting" in CLAUDE.md. Recorded
+    // from three places: a failed download/flash (checkForFirmwareUpdate() in
+    // main.cpp), a completed rollback detected on boot, and a forced rollback
+    // after too many unconfirmed boots (both in checkBootHealth() below).
+    // `reason` and `detail` are short, space-free tokens (not free text) so they
+    // fit the line-based CFG wire protocol unescaped.
+    void recordFailure(const String& reason, const String& attemptedVersion, const String& detail);
+    bool hasFailure() const { return failurePresent_; }
+    const String& failureReason() const { return failureReason_; }
+    const String& failureAttemptedVersion() const { return failureAttempted_; }
+    const String& failureDetail() const { return failureDetail_; }
+    time_t failureTime() const { return failureTime_; }
+    void clearFailure();
+
 private:
     Preferences prefs_;
     String pendingVersion_;   // version we OTA'd to but haven't confirmed yet ("" = none pending)
     String previousVersion_;  // version we OTA'd from, for detecting a completed rollback
     uint32_t bootAttempts_ = 0;
+
+    bool failurePresent_ = false;
+    String failureReason_;
+    String failureAttempted_;
+    String failureDetail_;
+    time_t failureTime_ = 0;
 
     void loadFromNVS();
     void savePendingOta();

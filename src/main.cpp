@@ -123,6 +123,7 @@ struct ClockSnapshot {
   int weatherHigh, weatherLow;
   bool locationConfigured;
   bool wifiCredsAvailable;
+  bool otaFailurePending;
 };
 
 // The previous wake's snapshot and whether it's usable to reconstruct a
@@ -238,6 +239,7 @@ bool wifiCredentialsAvailable() { return activeWifiSsid()[0] != '\0'; }
 // same stream. Only active during the button-wake maintenance window and
 // the first-boot awake window (see loop()).
 //   CFG GET_STATUS              -> >>STATUS configured=0|1 lat=<f> lon=<f> fw=<version> wifi=0|1
+//                                    owner=<gh_owner> repo=<gh_repo>
 //   CFG SET_LOCATION <lat> <lon> -> >>OK SET_LOCATION | >>ERR RANGE|PARSE
 //   CFG GET_WIFI_SSID           -> >>WIFI_SSID <ssid>  (blank when unset)
 //   CFG SET_WIFI_SSID <ssid>    -> >>OK SET_WIFI_SSID | >>ERR RANGE
@@ -245,6 +247,15 @@ bool wifiCredentialsAvailable() { return activeWifiSsid()[0] != '\0'; }
 //     SSID/password take the rest of the line verbatim (spaces allowed),
 //     which is why they're separate commands rather than sharing one line
 //     like SET_LOCATION's two floats.
+//   CFG GET_OTA_STATUS          -> >>OTA_STATUS failed=0|1 attempted=<ver> reason=<str>
+//                                    detail=<str> at=<epoch>
+//     Durable (NVS-backed) record of the most recent OTA failure — see
+//     OtaHealth::recordFailure() in ota_health.cpp for who writes it and
+//     "OTA failure reporting" in CLAUDE.md for the full picture. reason/detail
+//     are short machine tokens (no spaces), not free text.
+//   CFG CLEAR_OTA_STATUS        -> >>OK CLEAR_OTA_STATUS
+//     Acknowledges/dismisses the current OTA failure record (e.g. after the
+//     user has filed or seen the report) so it stops being surfaced.
 //   CFG REBOOT                  -> >>OK REBOOT, then restarts immediately into
 //                                   a normal (non-button) wake cycle instead of
 //                                   waiting out the rest of the maintenance window
@@ -266,8 +277,17 @@ void handleSerialProvisioning() {
     if (lineBuf[0] == '\0') continue;
 
     if (strcmp(lineBuf, "CFG GET_STATUS") == 0) {
-      Serial.printf(">>STATUS configured=%d lat=%.4f lon=%.4f fw=%s wifi=%d\n",
-                     locationConfigured ? 1 : 0, userLat, userLon, FIRMWARE_VERSION, wifiConfigured ? 1 : 0);
+      Serial.printf(">>STATUS configured=%d lat=%.4f lon=%.4f fw=%s wifi=%d owner=%s repo=%s\n",
+                     locationConfigured ? 1 : 0, userLat, userLon, FIRMWARE_VERSION, wifiConfigured ? 1 : 0,
+                     OTA_GITHUB_OWNER, OTA_GITHUB_REPO);
+    } else if (strcmp(lineBuf, "CFG GET_OTA_STATUS") == 0) {
+      Serial.printf(">>OTA_STATUS failed=%d attempted=%s reason=%s detail=%s at=%ld\n",
+                     otaHealth.hasFailure() ? 1 : 0, otaHealth.failureAttemptedVersion().c_str(),
+                     otaHealth.failureReason().c_str(), otaHealth.failureDetail().c_str(),
+                     (long)otaHealth.failureTime());
+    } else if (strcmp(lineBuf, "CFG CLEAR_OTA_STATUS") == 0) {
+      otaHealth.clearFailure();
+      Serial.println(">>OK CLEAR_OTA_STATUS");
     } else if (strncmp(lineBuf, "CFG SET_LOCATION ", 17) == 0) {
       float lat, lon;
       if (sscanf(lineBuf + 17, "%f %f", &lat, &lon) == 2) {
@@ -501,12 +521,26 @@ void drawClock(const ClockSnapshot &s) {
   // Weekday, top-left, tracked bold caps
   drawTrackedText(haveTime ? WEEKDAY_NAMES[wday] : "", marginX, 30, InterBold, FONT_PX_WEEKDAY, 6);
 
+  // OTA-failure hint, top-right — shown until the user dismisses it (CFG
+  // CLEAR_OTA_STATUS, sent by docs/provision.html once they've seen/reported
+  // it). See OtaHealth::recordFailure() and "OTA failure reporting" in
+  // CLAUDE.md. Pushes the battery icon below it when both are showing.
+  int topRightY = 30;
+  if (s.otaFailurePending) {
+    const char *hint = "UPDATE FAILED - PRESS BUTTON";
+    const int hintLetterSpacing = 2;
+    int hintW = trackedTextWidth(hint, InterBold, FONT_PX_LABEL, hintLetterSpacing);
+    drawTrackedText(hint, SCREEN_W - marginX - hintW, topRightY, InterBold, FONT_PX_LABEL,
+                     hintLetterSpacing, TFT_BLACK);
+    topRightY += FONT_PX_LABEL + 14;
+  }
+
   // Battery icon, top-right, icon only (no percentage text) — only shown
   // once it's actually low, so it doesn't clutter the face the rest of the
   // time.
   int battPercent = getBatteryPercent(s.batteryVoltage);
   if (battPercent < 20) {
-    drawBatteryIcon(SCREEN_W - marginX - 40, 34, battPercent, false);
+    drawBatteryIcon(SCREEN_W - marginX - 40, topRightY, battPercent, false);
   }
 
   // Bottom bar (rule + date/weather row) sits close to the bottom edge.
@@ -674,6 +708,16 @@ void drawNightClock(const ClockSnapshot &s) {
   sdfDrawTabularDigits(epaper, InterBold, xStart + hourW + colonW, yPos, minStr, FONT_PX_CLOCK_DIGITS, 1.0f, TFT_WHITE);
 
   drawNightCaption(SCREEN_W / 2, yPos + 45, haveTime ? WEEKDAY_NAMES[wday] : "", ampm);
+
+  // Same OTA-failure hint as the day face (see drawClock()), small and
+  // centered beneath the caption so it doesn't compete with the time.
+  if (s.otaFailurePending) {
+    const char *hint = "UPDATE FAILED - PRESS BUTTON";
+    const int hintLetterSpacing = 2;
+    int hintW = trackedTextWidth(hint, InterBold, FONT_PX_NIGHT_CAPTION, hintLetterSpacing);
+    drawTrackedText(hint, SCREEN_W / 2 - hintW / 2, yPos + 90, InterBold, FONT_PX_NIGHT_CAPTION,
+                     hintLetterSpacing, TFT_WHITE);
+  }
 }
 
 // Captures everything the clock face needs to render "right now," rounded
@@ -706,6 +750,7 @@ ClockSnapshot captureCurrentSnapshot(float batteryVoltage) {
   s.weatherLow = weatherLow;
   s.locationConfigured = locationConfigured;
   s.wifiCredsAvailable = wifiCredentialsAvailable();
+  s.otaFailurePending = otaHealth.hasFailure();
   return s;
 }
 
@@ -1030,10 +1075,24 @@ bool fetchLatestRelease(String &tagOut, String &assetUrlOut) {
   return false;
 }
 
+// Turns spaces into underscores in place, so a human-readable string (e.g.
+// Update.errorString()) is safe to embed as one token in the space-delimited
+// CFG wire protocol (see handleSerialProvisioning()). Uses only length()/
+// operator[] rather than String::replace() so it works against both the real
+// Arduino String and the simulator's stub (simulator/stubs/Arduino.h), which
+// doesn't implement replace().
+void sanitizeToken(String &s) {
+  for (int i = 0; i < s.length(); i++) {
+    if (s[i] == ' ') s[i] = '_';
+  }
+}
+
 // Downloads the firmware binary at `url` and writes it to the inactive OTA
 // partition. Returns true if the write succeeded (caller should then
-// ESP.restart() to boot into it).
-bool downloadAndFlashFirmware(const String &url) {
+// ESP.restart() to boot into it). On failure, `errorDetailOut` is set to a
+// short, space-free token describing what went wrong — surfaced to the user
+// via OtaHealth's failure record (see "OTA failure reporting" in CLAUDE.md).
+bool downloadAndFlashFirmware(const String &url, String &errorDetailOut) {
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
@@ -1044,6 +1103,7 @@ bool downloadAndFlashFirmware(const String &url) {
   int httpCode = http.GET();
   if (httpCode != 200) {
     Serial.printf("Firmware download HTTP error: %d\n", httpCode);
+    errorDetailOut = String("download_http_") + httpCode;
     http.end();
     return false;
   }
@@ -1051,6 +1111,8 @@ bool downloadAndFlashFirmware(const String &url) {
   int len = http.getSize();
   if (!Update.begin(len > 0 ? (size_t)len : UPDATE_SIZE_UNKNOWN)) {
     Serial.printf("Update.begin failed: %s\n", Update.errorString());
+    errorDetailOut = String("update_begin_") + Update.errorString();
+    sanitizeToken(errorDetailOut);
     http.end();
     return false;
   }
@@ -1061,6 +1123,8 @@ bool downloadAndFlashFirmware(const String &url) {
 
   if (!ok) {
     Serial.printf("Firmware update failed (%u bytes written): %s\n", (unsigned)written, Update.errorString());
+    errorDetailOut = String("write_") + (long)written + "of" + len + "_" + Update.errorString();
+    sanitizeToken(errorDetailOut);
     return false;
   }
 
@@ -1118,20 +1182,26 @@ void checkForFirmwareUpdate(bool forceCheck = false) {
   epaper.update();
 #endif
 
-  if (downloadAndFlashFirmware(assetUrl)) {
+  String errorDetail;
+  if (downloadAndFlashFirmware(assetUrl, errorDetail)) {
     otaFailCount = 0;
     otaFailedVersion[0] = '\0';
+    otaHealth.clearFailure();  // this attempt is flashing cleanly — drop any stale record
     otaHealth.recordOtaAttempt(FIRMWARE_VERSION, tag);
     Serial.println("Update installed — restarting");
     Serial.flush();
     delay(200);
     ESP.restart();
-  } else if (strcmp(otaFailedVersion, tag.c_str()) == 0) {
-    otaFailCount++;
   } else {
-    strncpy(otaFailedVersion, tag.c_str(), sizeof(otaFailedVersion) - 1);
-    otaFailedVersion[sizeof(otaFailedVersion) - 1] = '\0';
-    otaFailCount = 1;
+    if (strcmp(otaFailedVersion, tag.c_str()) == 0) {
+      otaFailCount++;
+    } else {
+      strncpy(otaFailedVersion, tag.c_str(), sizeof(otaFailedVersion) - 1);
+      otaFailedVersion[sizeof(otaFailedVersion) - 1] = '\0';
+      otaFailCount = 1;
+    }
+    String detail = errorDetail + "_attempt" + otaFailCount;
+    otaHealth.recordFailure("download_flash", tag, detail);
   }
 }
 

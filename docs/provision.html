@@ -137,6 +137,15 @@
     </div>
   </div>
 
+  <div id="otaPanel" class="panel hidden" style="border-color: var(--err);">
+    <h2 class="section" style="color: var(--err);">OTA update failed</h2>
+    <p id="otaSummary" class="status-line err"></p>
+    <div class="actions">
+      <button id="otaReportBtn" class="primary">Report on GitHub</button>
+      <button id="otaDismissBtn">Dismiss</button>
+    </div>
+  </div>
+
   <div id="configPanel" class="panel hidden">
     <p id="deviceInfo" class="status-line"></p>
 
@@ -189,6 +198,10 @@
   const connState = document.getElementById('connState');
   const configPanel = document.getElementById('configPanel');
   const deviceInfo = document.getElementById('deviceInfo');
+  const otaPanel = document.getElementById('otaPanel');
+  const otaSummary = document.getElementById('otaSummary');
+  const otaReportBtn = document.getElementById('otaReportBtn');
+  const otaDismissBtn = document.getElementById('otaDismissBtn');
   const ssidInput = document.getElementById('ssid');
   const passInput = document.getElementById('pass');
   const latInput = document.getElementById('lat');
@@ -223,6 +236,7 @@
     connectBtn.classList.remove('hidden');
     disconnectBtn.classList.add('hidden');
     configPanel.classList.add('hidden');
+    otaPanel.classList.add('hidden');
   });
 
   if (!('serial' in navigator)) {
@@ -242,6 +256,18 @@
   // one", since the password field can never be prefilled (never echoed
   // back) and we don't want an untouched save to silently blank it out.
   let currentSsid = '';
+  // Repo + running firmware version, read from CFG GET_STATUS, used to build
+  // the prefilled GitHub issue link below.
+  let deviceOwner = '';
+  let deviceRepo = '';
+  let deviceFw = '';
+  let lastOtaStatus = null;
+
+  const OTA_REASON_LABELS = {
+    download_flash: 'Downloading or flashing the new firmware failed',
+    boot_rollback: 'The device booted the new firmware but it was rolled back',
+    unconfirmed_boot: 'The new firmware never confirmed itself healthy and was rolled back',
+  };
 
   function setConnState(text, cls) {
     connState.textContent = text;
@@ -312,6 +338,36 @@
     return out;
   }
 
+  function parseOtaStatus(reply) {
+    // "OTA_STATUS failed=1 attempted=0.9.13 reason=download_flash detail=download_http_404_attempt1 at=1737480000"
+    const out = {};
+    reply.replace(/^OTA_STATUS\s+/, '').split(/\s+/).forEach(pair => {
+      const [k, v] = pair.split('=');
+      if (k) out[k] = v;
+    });
+    return out;
+  }
+
+  async function refreshOtaStatus() {
+    try {
+      const reply = await sendCommand('CFG GET_OTA_STATUS');
+      const st = parseOtaStatus(reply);
+      if (st.failed === '1') {
+        lastOtaStatus = st;
+        const when = st.at && st.at !== '0' ? new Date(st.at * 1000).toLocaleString() : 'unknown time';
+        const label = OTA_REASON_LABELS[st.reason] || st.reason || 'unknown reason';
+        otaSummary.textContent = `${label} (attempted ${st.attempted || '?'}, ${when}). Detail: ${st.detail || 'n/a'}`;
+        otaPanel.classList.remove('hidden');
+      } else {
+        lastOtaStatus = null;
+        otaPanel.classList.add('hidden');
+      }
+    } catch (e) {
+      // Best-effort — don't block the rest of the status refresh on this.
+      log('meta', 'Could not read OTA status: ' + e.message);
+    }
+  }
+
   async function refreshStatus() {
     try {
       const reply = await sendCommand('CFG GET_STATUS');
@@ -321,6 +377,9 @@
         latInput.value = st.lat;
         lonInput.value = st.lon;
       }
+      deviceOwner = st.owner || '';
+      deviceRepo = st.repo || '';
+      deviceFw = st.fw || '';
 
       let wifiLabel = 'not set';
       if (st.wifi === '1') {
@@ -338,6 +397,8 @@
 
       deviceInfo.textContent = `Firmware ${st.fw || '?'} — WiFi ${wifiLabel} — location ` +
         (configured ? `set (${st.lat}, ${st.lon})` : 'not set');
+
+      await refreshOtaStatus();
     } catch (e) {
       deviceInfo.textContent = 'Connected, but device did not respond — is it in maintenance mode?';
     }
@@ -373,7 +434,41 @@
       connectBtn.classList.remove('hidden');
       disconnectBtn.classList.add('hidden');
       configPanel.classList.add('hidden');
+      otaPanel.classList.add('hidden');
       saveResult.textContent = '';
+    }
+  });
+
+  otaReportBtn.addEventListener('click', () => {
+    if (!lastOtaStatus) return;
+    const owner = deviceOwner || 'OWNER';
+    const repo = deviceRepo || 'REPO';
+    const label = OTA_REASON_LABELS[lastOtaStatus.reason] || lastOtaStatus.reason || 'unknown reason';
+    const when = lastOtaStatus.at && lastOtaStatus.at !== '0'
+      ? new Date(lastOtaStatus.at * 1000).toLocaleString() : 'unknown time';
+    const title = `OTA update failed: ${lastOtaStatus.reason || 'unknown'} ` +
+      `(attempted ${lastOtaStatus.attempted || '?'})`;
+    const body = [
+      `**What happened:** ${label}`,
+      `**Attempted version:** ${lastOtaStatus.attempted || '?'}`,
+      `**Running firmware:** ${deviceFw || '?'}`,
+      `**Detail:** ${lastOtaStatus.detail || 'n/a'}`,
+      `**Recorded at:** ${when}`,
+      '',
+      '<!-- Add anything else you noticed (e.g. what the device was doing) here -->',
+    ].join('\n');
+    const url = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/new` +
+      `?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+    window.open(url, '_blank', 'noopener');
+  });
+
+  otaDismissBtn.addEventListener('click', async () => {
+    try {
+      await sendCommand('CFG CLEAR_OTA_STATUS');
+      lastOtaStatus = null;
+      otaPanel.classList.add('hidden');
+    } catch (e) {
+      log('meta', 'Failed to clear OTA status: ' + e.message);
     }
   });
 
