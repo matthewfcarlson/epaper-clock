@@ -5,19 +5,25 @@ name: Release firmware
 # this repo's latest release nightly (see CLAUDE.md's "Firmware auto-update"
 # section) and self-flash when the tag is newer than their running version.
 #
-# Also accepts workflow_dispatch, dispatched against the tag itself (so
-# GITHUB_REF_NAME below still resolves correctly) — tag-release.yml uses this
-# right after pushing a new tag, since a tag pushed with the default
+# Also accepts workflow_dispatch with an explicit `tag` input — tag-release.yml
+# uses this right after pushing a new tag, since a tag pushed with the default
 # GITHUB_TOKEN does NOT trigger other on:push workflows (GitHub's anti-
 # recursion guard exempts workflow_dispatch/repository_dispatch from that,
 # which is why this needs both triggers rather than push alone). It's also
-# handy for manually re-running a build for an existing tag without having
-# to re-push it.
+# the way to manually re-run a build for an existing tag without re-pushing
+# it — deliberately a typed input rather than relying on the "Use workflow
+# from" branch/tag selector in the Actions UI, which defaults to the
+# selected branch (usually main) and silently builds the wrong thing if you
+# forget to change it there instead.
 on:
   push:
     tags:
       - "v*.*.*"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release, e.g. v0.9.8 (must match FIRMWARE_VERSION in src/version.h on that tag)"
+        required: true
 
 permissions:
   # softprops/action-gh-release needs this to create the release and generate
@@ -29,14 +35,29 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve target tag
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # Explicit ref so a workflow_dispatch run always builds the tag named
+      # in the `tag` input, regardless of which branch/tag the "Use workflow
+      # from" selector was left on when it was triggered.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.tag }}
 
       - name: Verify tag matches FIRMWARE_VERSION
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${{ steps.target.outputs.tag }}"
           version="$(grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' src/version.h | tr -d '"')"
-          if [ "$tag" != "$version" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match FIRMWARE_VERSION \"$version\" in src/version.h"
+          if [ "${tag#v}" != "$version" ]; then
+            echo "::error::Tag ${tag} does not match FIRMWARE_VERSION \"$version\" in src/version.h"
             exit 1
           fi
 
