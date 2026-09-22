@@ -4,18 +4,19 @@ name: Tag release
 # both the web UI and the GitHub mobile app (pick the branch to tag, usually
 # main after merging a version bump), and can be kicked off from a desk too
 # via `gh workflow run tag-release.yml --ref main`. Reads FIRMWARE_VERSION
-# off the selected branch's src/version.h and creates+pushes a matching
-# vX.Y.Z tag — which is all release-firmware.yml needs to build and publish
-# the release, since it already triggers on that tag pattern. This exists
-# because pushing a tag from an interactive/agent session can be blocked by
-# credentials scoped to branches only; a workflow run with the repo's own
-# GITHUB_TOKEN doesn't have that problem.
+# off the selected branch's src/version.h, creates+pushes a matching vX.Y.Z
+# tag, then explicitly dispatches release-firmware.yml for that tag — a tag
+# pushed with the default GITHUB_TOKEN does NOT trigger other on:push
+# workflows (GitHub's anti-recursion guard), so without that explicit
+# dispatch the tag would go up with no release ever built for it.
 on:
   workflow_dispatch: {}
 
 permissions:
   # Needed to push the new tag.
   contents: write
+  # Needed to dispatch release-firmware.yml afterward.
+  actions: write
 
 jobs:
   tag:
@@ -48,7 +49,12 @@ jobs:
           git tag "$tag"
           git push origin "$tag"
 
+      - name: Trigger release-firmware.yml for the new tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release-firmware.yml --ref "${{ steps.version.outputs.tag }}"
+
       - name: Summary
         run: |
-          echo "Tagged and pushed ${{ steps.version.outputs.tag }} from \`${{ github.ref_name }}\` (${{ github.sha }})." >> "$GITHUB_STEP_SUMMARY"
-          echo "release-firmware.yml should pick it up shortly: https://github.com/${{ github.repository }}/actions/workflows/release-firmware.yml" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tagged and pushed ${{ steps.version.outputs.tag }} from \`${{ github.ref_name }}\` (${{ github.sha }}), and dispatched release-firmware.yml for it." >> "$GITHUB_STEP_SUMMARY"
+          echo "https://github.com/${{ github.repository }}/actions/workflows/release-firmware.yml" >> "$GITHUB_STEP_SUMMARY"
