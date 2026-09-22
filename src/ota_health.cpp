@@ -7,7 +7,6 @@ static const char* NVS_NAMESPACE = "ota_health";
 static const char* KEY_PEND_VER = "pend_ver";
 static const char* KEY_PREV_VER = "prev_ver";
 static const char* KEY_ATTEMPTS = "attempts";
-static const char* KEY_LAST_VER = "last_ver";
 
 static const char* resetReasonToString(esp_reset_reason_t reason) {
     switch (reason) {
@@ -38,7 +37,6 @@ void OtaHealth::loadFromNVS() {
     pendingVersion_ = prefs_.getString(KEY_PEND_VER, "");
     previousVersion_ = prefs_.getString(KEY_PREV_VER, "");
     bootAttempts_ = prefs_.getUInt(KEY_ATTEMPTS, 0);
-    lastRunVersion_ = prefs_.getString(KEY_LAST_VER, "");
     prefs_.end();
 }
 
@@ -69,19 +67,6 @@ void OtaHealth::recordOtaAttempt(const String& fromVersion, const String& toVers
 }
 
 void OtaHealth::checkBootHealth() {
-    // Detected independently of the pending-OTA state below, so it also catches a
-    // manual USB reflash (which never goes through recordOtaAttempt()) — see the
-    // comment on versionChangedThisBoot() in ota_health.h.
-    versionChangedThisBoot_ = (lastRunVersion_ != FIRMWARE_VERSION);
-    if (versionChangedThisBoot_) {
-        Serial.printf("OtaHealth: firmware version changed since last boot (%s -> %s)\n",
-                      lastRunVersion_.c_str(), FIRMWARE_VERSION);
-        lastRunVersion_ = FIRMWARE_VERSION;
-        prefs_.begin(NVS_NAMESPACE, false);
-        prefs_.putString(KEY_LAST_VER, lastRunVersion_);
-        prefs_.end();
-    }
-
     bool hasPending = pendingVersion_.length() > 0;
     // We flashed `pendingVersion_` but are now back on `previousVersion_` without ever
     // confirming the new one — either the bootloader auto-rolled-back after a boot-time

@@ -84,11 +84,6 @@ const float CALIBRATION_FACTOR = 0.968;
 // this holds a reliable link while drawing meaningfully less current.
 #define WIFI_TX_POWER WIFI_POWER_11dBm
 
-// Most wakes use the panel's partial-refresh waveform (faster, lower current,
-// no full-panel flash) instead of a full refresh. Partial refreshes
-// accumulate visible ghosting over time, so force a full refresh periodically.
-#define FULL_REFRESH_EVERY_N_PARTIAL 12
-
 // Persistent across deep sleep
 RTC_DATA_ATTR uint32_t wakeCount = 0;
 RTC_DATA_ATTR bool everSynced = false;
@@ -114,8 +109,6 @@ RTC_DATA_ATTR uint8_t otaFailCount = 0;
 RTC_DATA_ATTR uint8_t wifiChannel = 0;
 RTC_DATA_ATTR uint8_t wifiBssid[6] = {0, 0, 0, 0, 0, 0};
 RTC_DATA_ATTR bool wifiBssidValid = false;
-// Wakes since the last full (ghost-clearing) e-paper refresh
-RTC_DATA_ATTR uint16_t partialRefreshCount = 0;
 
 // Night window can wrap past midnight (e.g. 23 -> 6), so this can't be a
 // simple range comparison.
@@ -698,18 +691,21 @@ void drawClockForCurrentTime(float batteryVoltage) {
   }
 }
 
-// Pushes the drawn clock face to the panel. Most wakes use a partial refresh
-// (faster, lower current, no full-panel flash); periodically forces a full
-// refresh since partial refreshes alone accumulate visible ghosting.
+// Pushes the drawn clock face to the panel. Always a full refresh: the
+// UC8179 driver's partial-refresh path (Seeed_GFX's updataPartial()) only
+// pushes the new image and relies on old-image comparison data already
+// resident in the panel controller's SRAM. That SRAM does not survive
+// either EPD_SLEEP() (issued at the end of every update/updataPartial call
+// here) or the hardware reset updataPartial() itself issues via
+// EPD_WAKEUP_PARTIAL() when waking a sleeping panel — and since this device
+// deep-sleeps between every wake, both conditions are hit on every single
+// wake. So a partial refresh here always diffs against stale/garbage SRAM
+// instead of the actual previous frame, corrupting the display immediately
+// rather than merely ghosting it over time. epaper.update() sidesteps this
+// entirely by pushing the *current* frame as both old and new, so it never
+// depends on any state surviving between wakes.
 void refreshClockDisplay() {
-  bool forceFull = (partialRefreshCount == 0) || (partialRefreshCount >= FULL_REFRESH_EVERY_N_PARTIAL);
-  if (forceFull) {
-    epaper.update();
-    partialRefreshCount = 1;
-  } else {
-    epaper.updataPartial(0, 0, SCREEN_W, SCREEN_H);
-    partialRefreshCount++;
-  }
+  epaper.update();
 }
 
 uint64_t getSleepDuration() {
@@ -1134,14 +1130,6 @@ void setup() {
   // ota_health.h for what this detects/enforces.
   otaHealth.begin();
   otaHealth.checkBootHealth();
-
-  // The firmware that just landed (or was just rolled back to) may render the
-  // clock face differently than whatever's still on the panel from the last
-  // wake cycle — force a full refresh instead of a partial one so that change
-  // doesn't show up as ghosting.
-  if (otaHealth.versionChangedThisBoot()) {
-    partialRefreshCount = 0;
-  }
 
   loadLocationConfig();
   loadWifiConfig();
