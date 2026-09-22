@@ -31,6 +31,7 @@ endif
 
 CXXFLAGS = -std=c++17 -Wall -Wno-unused-function -Wno-unused-variable \
            -Wno-deprecated-declarations -Wno-format-security \
+           -D EPAPER_SIM_BUILD \
            -I stubs -I .. \
            $(SDL_CFLAGS) $(TTF_CFLAGS)
 

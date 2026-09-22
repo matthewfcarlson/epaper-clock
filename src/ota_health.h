@@ -48,19 +48,11 @@ public:
     // of setup() without crashing/hanging). No-op if no OTA is pending confirmation.
     void confirmHealthy();
 
-    // True for exactly the one checkBootHealth() call where this boot is running
-    // different firmware than the last wake cycle did (a fresh OTA flash landing, or
-    // a rollback reverting to the previous version). The caller uses this to force a
-    // full e-paper refresh, since a partial refresh over a frame drawn by different
-    // firmware (different fonts/layout) is what produces visible ghosting artifacts.
-    bool versionChangedThisBoot() const { return versionChangedThisBoot_; }
-
 private:
     Preferences prefs_;
     String pendingVersion_;   // version we OTA'd to but haven't confirmed yet ("" = none pending)
     String previousVersion_;  // version we OTA'd from, for detecting a completed rollback
     uint32_t bootAttempts_ = 0;
-    bool versionChangedThisBoot_ = false;
 
     void loadFromNVS();
     void savePendingOta();

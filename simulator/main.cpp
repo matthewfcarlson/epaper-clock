@@ -102,6 +102,29 @@ int main(int argc, char **argv) {
     // "CFG SET_LOCATION" command would. Default: zip 78681 (Round Rock, TX).
     saveLocationConfig(30.5218f, -97.7193f);
 
+    // Export mode normally exits after one power-on cycle — enough to see
+    // the boot screens, but never far enough to reach a second wake, which
+    // is where refreshClockDisplay() actually takes the primed-partial
+    // path (see EPaperGhostSim.h for why that path is worth being able to
+    // watch play out over several frames). SIM_CYCLES runs that many
+    // cycles in export mode before exiting instead of just one.
+    int cyclesRemaining = 1;
+    if (const char *cyclesEnv = getenv("SIM_CYCLES")) {
+        int n = atoi(cyclesEnv);
+        if (n > 0) cyclesRemaining = n;
+    }
+    // Each cycle only advances the simulator's notion of "now" by whatever
+    // real wall-clock time elapses during it, which — outside SIM_TIME —
+    // is far less than the simulated sleep duration; multi-cycle export
+    // would otherwise see the same rounded time on every frame. Seed a
+    // time override (from SIM_TIME if set, else the real current time) and
+    // advance it by the actual computed sleep duration between cycles, so
+    // multiple exported frames show real transitions (minute changes,
+    // etc.) instead of all looking identical.
+    if (cyclesRemaining > 1 && g_sim_time_override == 0) {
+        g_sim_time_override = time(nullptr);
+    }
+
     // Each iteration of this loop simulates one power-on cycle.
     // RTC_DATA_ATTR globals (plain globals here) persist across iterations,
     // just as they would survive deep sleep on real hardware.
@@ -115,9 +138,15 @@ int main(int argc, char **argv) {
             loop();
         }
 
-        // In export mode: all frames have been saved; exit cleanly.
+        // In export mode: exit once every requested cycle has run.
         if (epaper.exportMode()) {
-            epaper.cleanup(0);
+            if (--cyclesRemaining <= 0) {
+                epaper.cleanup(0);
+            }
+            if (g_sim_time_override != 0) {
+                g_sim_time_override += (time_t)(g_sleep_us / 1000000);
+            }
+            continue;
         }
 
         // Interactive mode: simulate the sleep with a brief pause (capped at 5 s)

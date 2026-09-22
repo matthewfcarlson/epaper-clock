@@ -81,12 +81,10 @@ void OtaHealth::checkBootHealth() {
         Serial.printf("OtaHealth: %s was rolled back to %s (reset reason: %s)\n",
                       pendingVersion_.c_str(), FIRMWARE_VERSION, resetReasonToString(esp_reset_reason()));
         clearPendingOta();
-        versionChangedThisBoot_ = true;
         return;
     }
 
     if (isPendingVersion) {
-        versionChangedThisBoot_ = (bootAttempts_ == 0);  // first boot on this new version
         bootAttempts_++;
         savePendingOta();
         Serial.printf("OtaHealth: unconfirmed OTA boot %u/%u on version %s (reset reason: %s)\n",

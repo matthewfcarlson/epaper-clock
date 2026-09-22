@@ -162,10 +162,40 @@ public:
         renderText(str, cx - w / 2, y, fontNum);
     }
 
-    // Present the current frame.
-    // In export mode: also save a numbered JPEG (does NOT exit — main.cpp exits after
-    // the boot cycle ends so we capture all frames, not just the first).
+    // Present the current frame. In export mode: also save a numbered JPEG
+    // (does NOT exit — main.cpp exits after the boot cycle ends so we
+    // capture all frames, not just the first).
     void update() {
+        presentAndMaybeExport();
+    }
+
+    // Sim has no separate backing buffer / waveform to distinguish partial
+    // from full refresh — both just present the current frame. Overridden
+    // by EPaperPartial (EPaperGhostSim.h) with a real ghosting simulation;
+    // this base version only runs if something bypasses that subclass.
+    void updataPartial(int, int, int, int) {
+        update();
+    }
+
+    void cleanup(int code) {
+        TTF_Quit();
+        if (renderer_) SDL_DestroyRenderer(renderer_);
+        if (window_)   SDL_DestroyWindow(window_);
+        SDL_Quit();
+        exit(code);
+    }
+
+protected:
+    // Shared with EPaperPartial (EPaperGhostSim.h), which needs to read
+    // back and overwrite rendered pixels to simulate the panel controller's
+    // old/new diffing — see that file.
+    SDL_Renderer *renderer_ = nullptr;
+    SDL_Texture  *target_   = nullptr;   // persistent render-target
+
+    // Saves a JPEG if in export mode, presents the frame, and pumps events
+    // — the part of a refresh that's identical regardless of how the
+    // pixels themselves got decided (plain present, or ghosting-simulated).
+    void presentAndMaybeExport() {
         if (exportMode()) {
             char buf[1024];
             snprintf(buf, sizeof(buf), "%s_%02d%s",
@@ -187,24 +217,56 @@ public:
         if (!exportMode()) SDL_Delay(500);
     }
 
-    // Sim has no separate backing buffer / waveform to distinguish partial
-    // from full refresh — both just present the current frame.
-    void updataPartial(int, int, int, int) {
-        update();
+    // Reads the current render target and packs it into a 1bpp buffer
+    // (bit=1 means black, MSB-first, row-major — SCREEN_W*SCREEN_H/8
+    // bytes), the same layout real EPaper::getPointer() (Seeed_GFX) would
+    // return. Thresholds at 50% luma, so anti-aliased glyph edges round to
+    // whichever side they're closer to — fine for catching real logic bugs
+    // (a wrong field, a missing redraw), which show up as large-scale
+    // mismatches, not lost in edge noise.
+    void captureRenderedBuffer(uint8_t *out) {
+        size_t bytes = (size_t)SCREEN_W * SCREEN_H / 8;
+        memset(out, 0, bytes);
+
+        SDL_Surface *surf = SDL_CreateRGBSurface(
+            0, SCREEN_W, SCREEN_H, 32,
+            0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
+        if (!surf) return;
+
+        if (SDL_RenderReadPixels(renderer_, nullptr, surf->format->format, surf->pixels, surf->pitch) != 0) {
+            SDL_FreeSurface(surf);
+            return;
+        }
+
+        auto *src = reinterpret_cast<uint32_t *>(surf->pixels);
+        for (int y = 0; y < SCREEN_H; y++) {
+            for (int x = 0; x < SCREEN_W; x++) {
+                uint32_t px = src[y * SCREEN_W + x];
+                int luma = (((px >> 16) & 0xFF) + ((px >> 8) & 0xFF) + (px & 0xFF)) / 3;
+                if (luma < 128) {
+                    out[y * (SCREEN_W / 8) + (x / 8)] |= (0x80 >> (x % 8));
+                }
+            }
+        }
+        SDL_FreeSurface(surf);
     }
 
-    void cleanup(int code) {
-        TTF_Quit();
-        if (renderer_) SDL_DestroyRenderer(renderer_);
-        if (window_)   SDL_DestroyWindow(window_);
-        SDL_Quit();
-        exit(code);
+    // Draws a packed 1bpp buffer (same layout as captureRenderedBuffer())
+    // onto the render target as solid black/white pixels — used to make a
+    // ghosting-simulated (possibly corrupted) result the thing that
+    // actually gets presented/exported, not what was originally drawn.
+    void blitPackedBuffer(const uint8_t *buf) {
+        for (int y = 0; y < SCREEN_H; y++) {
+            for (int x = 0; x < SCREEN_W; x++) {
+                bool black = buf[y * (SCREEN_W / 8) + (x / 8)] & (0x80 >> (x % 8));
+                SDL_SetRenderDrawColor(renderer_, black ? 0 : 255, black ? 0 : 255, black ? 0 : 255, 255);
+                SDL_RenderDrawPoint(renderer_, x, y);
+            }
+        }
     }
 
 private:
     SDL_Window   *window_    = nullptr;
-    SDL_Renderer *renderer_  = nullptr;
-    SDL_Texture  *target_    = nullptr;   // persistent render-target
     uint32_t      textColor_ = TFT_BLACK;
     int           textScale_ = 1;
     const GFXfont *freeFont_ = nullptr;
