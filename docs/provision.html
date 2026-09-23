@@ -170,10 +170,12 @@
         "Report on GitHub" by hand — via a small relay (see <code>cloudflare-worker/</code> in the repo)
         rather than a GitHub credential on the device itself. This secret only ever authorizes a POST to
         that relay's one rate-limited endpoint; it can't act on GitHub directly, unlike a GitHub token
-        would. <strong>Still stored on the device in plaintext</strong> (NVS isn't encrypted), so treat it
-        as a real secret, just a much lower-value one to lose. Only meaningful if the relay is deployed
-        and its URL is compiled in (<code>OTA_REPORT_ENDPOINT</code>) — the click-to-report flow above
-        works regardless. Never echoed back here once saved.
+        would. A release build may already have one compiled in via a repo secret (<code>OTA_REPORT_TOKEN</code>)
+        — entering one here just overrides that in NVS, e.g. to rotate it without reflashing.
+        <strong>Still stored on the device in plaintext</strong> (NVS isn't encrypted), so treat it as a
+        real secret, just a much lower-value one to lose. Only meaningful if the relay is deployed and its
+        URL is compiled in (<code>OTA_REPORT_ENDPOINT</code>) — the click-to-report flow above works
+        regardless. Never echoed back here once saved.
       </p>
     </div>
     <p id="reportTokenState" class="status-line"></p>
@@ -450,8 +452,8 @@
         (configured ? `set (${st.lat}, ${st.lon})` : 'not set');
 
       reportTokenState.textContent = st.report === '1'
-        ? 'A relay shared secret is currently stored on the device.'
-        : 'No relay secret stored — OTA failures are only reportable by hand, above.';
+        ? 'A relay shared secret is stored in NVS on the device (overrides any compiled-in default).'
+        : 'No relay secret stored in NVS — auto-report uses the compiled-in default, if the release build set one.';
 
       await refreshOtaStatus();
     } catch (e) {

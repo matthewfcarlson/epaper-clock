@@ -85,14 +85,22 @@ jobs:
       # OTA_REPORT_ENDPOINT isn't sensitive (it's just the deployed
       # cloudflare-worker/ URL, see CLAUDE.md's "OTA failure reporting"), but
       # is pulled from a repo secret anyway for consistency with the rest of
-      # this step. Fine to leave that secret unset entirely — an empty
-      # OTA_REPORT_ENDPOINT just disables the relay auto-report path (the
-      # click-to-report flow in docs/provision.html is unaffected).
+      # this step. OTA_REPORT_TOKEN *is* sensitive (must match the Worker's
+      # REPORT_SHARED_SECRET) but — unlike WIFI_SSID/PASS above — gets baked
+      # in here deliberately: it isn't tied to any one user's network the
+      # way WiFi credentials are, and it only ever authorizes a POST to the
+      # relay's one rate-limited endpoint (see the comment on
+      # userReportToken in src/main.cpp for the full reasoning). Fine to
+      # leave either secret unset entirely — an empty OTA_REPORT_ENDPOINT or
+      # OTA_REPORT_TOKEN just disables the relay auto-report path (the
+      # click-to-report flow in docs/provision.html is unaffected either
+      # way).
       - name: Write config.h from secrets
         env:
           TZ_INFO: ${{ secrets.TZ_INFO }}
           OWM_API_KEY: ${{ secrets.OWM_API_KEY }}
           OTA_REPORT_ENDPOINT: ${{ secrets.OTA_REPORT_ENDPOINT }}
+          OTA_REPORT_TOKEN: ${{ secrets.OTA_REPORT_TOKEN }}
         run: |
           repo_name="${GITHUB_REPOSITORY#*/}"
           cat > src/config.h <<EOF
@@ -107,6 +115,7 @@ jobs:
           const char *OTA_GITHUB_OWNER = "${{ github.repository_owner }}";
           const char *OTA_GITHUB_REPO = "$repo_name";
           const char *OTA_REPORT_ENDPOINT = "$OTA_REPORT_ENDPOINT";
+          const char *OTA_REPORT_TOKEN = "$OTA_REPORT_TOKEN";
           EOF
 
       - name: Build firmware

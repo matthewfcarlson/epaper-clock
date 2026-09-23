@@ -48,6 +48,7 @@ jobs:
           const char *OTA_GITHUB_OWNER = "matthewfcarlson";
           const char *OTA_GITHUB_REPO = "epaper-clock";
           const char *OTA_REPORT_ENDPOINT = "";
+          const char *OTA_REPORT_TOKEN = "";
           EOF
 
       - name: Build firmware
@@ -91,6 +92,7 @@ jobs:
           const char *OTA_GITHUB_OWNER = "matthewfcarlson";
           const char *OTA_GITHUB_REPO = "epaper-clock";
           const char *OTA_REPORT_ENDPOINT = "";
+          const char *OTA_REPORT_TOKEN = "";
           EOF
         working-directory: simulator
 

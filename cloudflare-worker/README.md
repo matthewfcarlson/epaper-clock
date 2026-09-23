@@ -92,12 +92,27 @@ it prints.
 
 ## 6. Wire it into the device
 
-- `src/config.h` (local dev) or the `OTA_REPORT_ENDPOINT` repo secret
-  (release builds, see `.github/workflows/release-firmware.yml`): set to
-  `https://.../report` (the deployed URL above, with `/report` appended).
-- Provision the same value you set for `REPORT_SHARED_SECRET` onto the
-  device via `docs/provision.html`'s "GitHub auto-report" field (`CFG
-  SET_REPORT_TOKEN` under the hood).
+Two values, either compiled in (release builds, via repo secrets — every
+device built from a tag picks these up automatically, no per-device step
+needed) or set locally in `src/config.h` for dev builds:
+
+- `OTA_REPORT_ENDPOINT` repo secret: `https://.../report` (the deployed URL
+  above, with `/report` appended).
+- `OTA_REPORT_TOKEN` repo secret: the same value as `REPORT_SHARED_SECRET`
+  from step 4. Unlike `WIFI_SSID`/`WIFI_PASS`, this one *is* baked into the
+  public release binary deliberately — see the comment on `userReportToken`
+  in `src/main.cpp` and "OTA failure reporting" in the repo root's
+  `CLAUDE.md` for why that's an acceptable tradeoff for this specific
+  secret (it can only ever hit this one rate-limited endpoint, never GitHub
+  directly).
+
+See `.github/workflows/release-firmware.yml` for where these get pulled in.
+If you'd rather not compile a shared secret in at all (e.g. you want a
+distinct token per device, or don't want it in the public binary), leave
+`OTA_REPORT_TOKEN` unset and instead provision each device individually via
+`docs/provision.html`'s "OTA-failure auto-report" field (`CFG
+SET_REPORT_TOKEN` under the hood, which takes priority over the compiled-in
+value whenever it's set).
 
 ## Optional: pre-create the `ota-failure` label
 

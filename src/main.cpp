@@ -285,15 +285,21 @@ void saveWifiPass(const char *pass) {
 
 // User-provisioned shared secret for the OTA-failure relay (see
 // reportOtaFailure() below and cloudflare-worker/), same NVS namespace as
-// WiFi/location above. Same "never compiled into the binary" rationale, but
-// an explicit opt-in the user types in themselves (unlike WiFi/location,
-// there's no compiled-in fallback and no migration path). Unlike a GitHub
-// PAT, this secret only ever authorizes a POST to the relay Worker's one
-// rate-limited endpoint — it can't act on GitHub directly, so the blast
-// radius of it being extracted from NVS (unencrypted, like everywhere else
-// in this project) is much smaller. See "OTA failure reporting" in
-// CLAUDE.md. The token-free click-to-report flow in docs/provision.html
-// remains available regardless of whether this is set.
+// WiFi/location above and — unlike the earlier device-held GitHub PAT this
+// replaced — also has a compiled-in fallback (OTA_REPORT_TOKEN, config.h),
+// same pattern as WIFI_SSID/WIFI_PASS: the release pipeline can bake it in
+// from a repo secret (see release-firmware.yml) since it's not tied to any
+// one user's network, and NVS (via CFG SET_REPORT_TOKEN, below) still takes
+// priority if set, e.g. to rotate it without reflashing. This is a real
+// change from a pure-NVS secret: the compiled-in value is extractable by
+// anyone who downloads the public release .bin, not just someone with
+// physical/USB access to one device. Accepted deliberately, on the same
+// reasoning that already applies to OWM_API_KEY: unlike a GitHub PAT, this
+// secret only ever authorizes a POST to the relay Worker's one rate-limited
+// endpoint (see "OTA failure reporting" in CLAUDE.md), so its worst case if
+// leaked is bounded and cheap to revoke (rotate the Worker's
+// REPORT_SHARED_SECRET and redeploy). The token-free click-to-report flow
+// in docs/provision.html remains available regardless of any of this.
 char userReportToken[65] = "";
 bool reportTokenConfigured = false;
 
@@ -324,6 +330,12 @@ void clearReportToken() {
   userReportToken[0] = '\0';
   reportTokenConfigured = false;
 }
+
+// NVS-provisioned token once set, otherwise whatever's compiled into
+// config.h (blank unless the release pipeline set OTA_REPORT_TOKEN from a
+// repo secret) — same fallback shape as activeWifiSsid()/activeWifiPass()
+// below.
+const char *activeReportToken() { return reportTokenConfigured ? userReportToken : OTA_REPORT_TOKEN; }
 
 // The credentials connectWiFi() should actually use: NVS-provisioned ones
 // once set, otherwise whatever's compiled into config.h (empty on the
@@ -1357,18 +1369,20 @@ String jsonEscape(const String &s) {
 
 // Best-effort auto-report of the current OTA failure via the OTA-failure
 // relay Cloudflare Worker (see cloudflare-worker/ and "OTA failure
-// reporting" in CLAUDE.md), using the user-provisioned shared secret (CFG
-// SET_REPORT_TOKEN — see handleSerialProvisioning()). The relay — not this
-// device — holds the actual GitHub credential (a GitHub App installation
-// token) and does the dedup/issue-filing; this function's job is just to
-// hand it the failure. This is the opt-in alternative to the click-to-
-// report flow in docs/provision.html for anyone who's deployed the relay;
-// that flow keeps working either way. No-op — left for the next wake to
-// retry, since otaHealth.failureReported() stays false — if the relay
-// endpoint isn't configured, there's no report token, no WiFi, or the
-// request itself fails.
+// reporting" in CLAUDE.md), using activeReportToken() (compiled-in
+// OTA_REPORT_TOKEN, or an NVS override via CFG SET_REPORT_TOKEN — see
+// handleSerialProvisioning()). The relay — not this device — holds the
+// actual GitHub credential (a GitHub App installation token) and does the
+// dedup/issue-filing; this function's job is just to hand it the failure.
+// This is the opt-in alternative to the click-to-report flow in
+// docs/provision.html for anyone who's deployed the relay; that flow keeps
+// working either way. No-op — left for the next wake to retry, since
+// otaHealth.failureReported() stays false — if the relay endpoint isn't
+// configured, there's no report token (NVS or compiled-in), no WiFi, or
+// the request itself fails.
 void reportOtaFailure() {
-  if (OTA_REPORT_ENDPOINT[0] == '\0' || !reportTokenConfigured) return;
+  const char *token = activeReportToken();
+  if (OTA_REPORT_ENDPOINT[0] == '\0' || token[0] == '\0') return;
   if (!otaHealth.hasFailure() || otaHealth.failureReported()) return;
 
   if (WiFi.status() != WL_CONNECTED) {
@@ -1389,7 +1403,7 @@ void reportOtaFailure() {
   http.begin(client, OTA_REPORT_ENDPOINT);
   http.addHeader("User-Agent", "epaper-clock-ota");
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("X-Report-Token", userReportToken);
+  http.addHeader("X-Report-Token", token);
 
   int httpCode = http.POST(json);
   http.end();
