@@ -17,6 +17,7 @@
 #include <Preferences.h>
 #include <esp_system.h>
 #include <time.h>
+#include <stdarg.h>
 #include "config.h"
 #include "version.h"
 #include "sdf_font.h"
@@ -103,6 +104,17 @@ RTC_DATA_ATTR time_t bootEpoch = 0;
 RTC_DATA_ATTR time_t lastOtaCheckTime = 0;
 RTC_DATA_ATTR char otaFailedVersion[16] = "";
 RTC_DATA_ATTR uint8_t otaFailCount = 0;
+
+// Ring buffer of recent OTA-path log lines (fetch/download/flash steps —
+// see otaLog() below), RTC_DATA_ATTR so it survives deep sleep (though not
+// power loss, same as everything else in this block — a power-loss crash
+// has no log to save anyway). Deliberately scoped to just the OTA check
+// path rather than the whole firmware's chatty Serial output, both to stay
+// small enough to sit comfortably in RTC slow memory and because that's
+// the trail actually useful for an OTA failure report — see "OTA failure
+// reporting" in CLAUDE.md.
+#define OTA_LOG_BUF_SIZE 768
+RTC_DATA_ATTR char otaLogBuf[OTA_LOG_BUF_SIZE] = "";
 // Cached AP channel/BSSID from the last successful connect, so the next
 // WiFi.begin() can skip the AP scan phase. Invalidated on a failed connect
 // so a changed/rebooted AP heals within one wake instead of failing repeatedly.
@@ -147,6 +159,52 @@ bool isNightHour(int h) {
     return h >= NIGHT_START_HOUR && h < NIGHT_END_HOUR;
   }
   return h >= NIGHT_START_HOUR || h < NIGHT_END_HOUR;
+}
+
+// Prints a line to Serial as usual, and also appends it to otaLogBuf,
+// dropping the oldest complete line(s) first if it's full. Used in place of
+// Serial.print*() at the handful of call sites in fetchLatestRelease()/
+// downloadAndFlashFirmware()/checkForFirmwareUpdate() that matter for
+// diagnosing an OTA failure after the fact (see "OTA failure reporting" in
+// CLAUDE.md).
+void otaLog(const char *fmt, ...) {
+  char line[128];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(line, sizeof(line), fmt, args);
+  va_end(args);
+
+  Serial.println(line);
+
+  size_t curLen = strlen(otaLogBuf);
+  size_t needed = strlen(line) + 1;  // +1 for the '\n' this line adds
+  if (curLen + needed >= sizeof(otaLogBuf)) {
+    size_t mustFree = curLen + needed - sizeof(otaLogBuf) + 1;
+    char *nl = strchr(otaLogBuf + (mustFree < curLen ? mustFree : curLen), '\n');
+    size_t dropTo = nl ? (size_t)(nl - otaLogBuf) + 1 : curLen;
+    memmove(otaLogBuf, otaLogBuf + dropTo, curLen - dropTo + 1);  // +1 copies the null terminator too
+  }
+  strcat(otaLogBuf, line);
+  strcat(otaLogBuf, "\n");
+}
+
+// Escapes '\' and embedded newlines so otaLogBuf's multi-line content can
+// travel as a single line in the CFG wire protocol (see "CFG GET_OTA_LOG"
+// below and provision.html's matching unescape).
+String escapeOtaLog(const char *s) {
+  String out;
+  char buf[2] = {0, 0};
+  for (const char *p = s; *p; p++) {
+    if (*p == '\\') {
+      out = out + "\\\\";
+    } else if (*p == '\n') {
+      out = out + "\\n";
+    } else {
+      buf[0] = *p;
+      out = out + buf;
+    }
+  }
+  return out;
 }
 
 float lastVoltage = 0;
@@ -225,6 +283,47 @@ void saveWifiPass(const char *pass) {
   userWifiPass[sizeof(userWifiPass) - 1] = '\0';
 }
 
+// User-provisioned GitHub personal access token, same NVS namespace as WiFi/
+// location above and same "never compiled into the binary" rationale — this
+// one, however, is an explicit opt-in the user types in themselves (unlike
+// WiFi/location, there's no compiled-in fallback and no migration path).
+// Scoped to just filing an issue (see reportOtaFailureToGitHub() below) —
+// only "Issues: write" on this one repo, if using a fine-grained token, is
+// all it needs. See "OTA failure reporting" in CLAUDE.md for the tradeoff
+// this opts into (a live credential resident in NVS, on unencrypted flash)
+// versus the token-free click-to-report flow in docs/provision.html, which
+// remains available either way.
+char userGithubPat[100] = "";  // classic tokens are ~40 chars, fine-grained ones ~93
+bool githubPatConfigured = false;
+
+void loadGithubPat() {
+  prefs.begin("clockcfg", true);
+  githubPatConfigured = prefs.getBool("pat_set", false);
+  String pat = prefs.getString("pat", "");
+  prefs.end();
+  strncpy(userGithubPat, pat.c_str(), sizeof(userGithubPat) - 1);
+  userGithubPat[sizeof(userGithubPat) - 1] = '\0';
+}
+
+void saveGithubPat(const char *pat) {
+  prefs.begin("clockcfg", false);
+  prefs.putBool("pat_set", true);
+  prefs.putString("pat", pat);
+  prefs.end();
+  strncpy(userGithubPat, pat, sizeof(userGithubPat) - 1);
+  userGithubPat[sizeof(userGithubPat) - 1] = '\0';
+  githubPatConfigured = true;
+}
+
+void clearGithubPat() {
+  prefs.begin("clockcfg", false);
+  prefs.remove("pat_set");
+  prefs.remove("pat");
+  prefs.end();
+  userGithubPat[0] = '\0';
+  githubPatConfigured = false;
+}
+
 // The credentials connectWiFi() should actually use: NVS-provisioned ones
 // once set, otherwise whatever's compiled into config.h (empty on the
 // public release build, possibly real for a local dev build).
@@ -239,7 +338,7 @@ bool wifiCredentialsAvailable() { return activeWifiSsid()[0] != '\0'; }
 // same stream. Only active during the button-wake maintenance window and
 // the first-boot awake window (see loop()).
 //   CFG GET_STATUS              -> >>STATUS configured=0|1 lat=<f> lon=<f> fw=<version> wifi=0|1
-//                                    owner=<gh_owner> repo=<gh_repo>
+//                                    owner=<gh_owner> repo=<gh_repo> pat=0|1
 //   CFG SET_LOCATION <lat> <lon> -> >>OK SET_LOCATION | >>ERR RANGE|PARSE
 //   CFG GET_WIFI_SSID           -> >>WIFI_SSID <ssid>  (blank when unset)
 //   CFG SET_WIFI_SSID <ssid>    -> >>OK SET_WIFI_SSID | >>ERR RANGE
@@ -248,18 +347,31 @@ bool wifiCredentialsAvailable() { return activeWifiSsid()[0] != '\0'; }
 //     which is why they're separate commands rather than sharing one line
 //     like SET_LOCATION's two floats.
 //   CFG GET_OTA_STATUS          -> >>OTA_STATUS failed=0|1 attempted=<ver> reason=<str>
-//                                    detail=<str> at=<epoch>
+//                                    detail=<str> at=<epoch> reported=0|1
 //     Durable (NVS-backed) record of the most recent OTA failure — see
 //     OtaHealth::recordFailure() in ota_health.cpp for who writes it and
 //     "OTA failure reporting" in CLAUDE.md for the full picture. reason/detail
-//     are short machine tokens (no spaces), not free text.
+//     are short machine tokens (no spaces), not free text. reported=1 means
+//     reportOtaFailureToGitHub() already auto-filed this one (see below).
 //   CFG CLEAR_OTA_STATUS        -> >>OK CLEAR_OTA_STATUS
 //     Acknowledges/dismisses the current OTA failure record (e.g. after the
 //     user has filed or seen the report) so it stops being surfaced.
+//   CFG GET_OTA_LOG             -> >>OTA_LOG <escaped text>
+//     otaLogBuf's contents (recent OTA-path log lines), with '\' and
+//     newlines escaped (see escapeOtaLog()) so multi-line content still fits
+//     one reply line — unescape client-side before displaying/downloading.
+//   CFG SET_GH_PAT <token>      -> >>OK SET_GH_PAT | >>ERR RANGE
+//     Optional: a GitHub personal access token (fine-grained, "Issues:
+//     write" on this repo is enough), used only by reportOtaFailureToGitHub()
+//     to auto-file an OTA failure as an issue. Never echoed back, same as
+//     the WiFi password. Entirely opt-in — see "OTA failure reporting" in
+//     CLAUDE.md for the tradeoff this accepts versus the token-free
+//     click-to-report flow in docs/provision.html, which works either way.
+//   CFG CLEAR_GH_PAT            -> >>OK CLEAR_GH_PAT
 //   CFG REBOOT                  -> >>OK REBOOT, then restarts immediately into
 //                                   a normal (non-button) wake cycle instead of
 //                                   waiting out the rest of the maintenance window
-#define PROVISION_LINE_MAX 96
+#define PROVISION_LINE_MAX 140
 void handleSerialProvisioning() {
   static char lineBuf[PROVISION_LINE_MAX];
   static size_t lineLen = 0;
@@ -277,17 +389,31 @@ void handleSerialProvisioning() {
     if (lineBuf[0] == '\0') continue;
 
     if (strcmp(lineBuf, "CFG GET_STATUS") == 0) {
-      Serial.printf(">>STATUS configured=%d lat=%.4f lon=%.4f fw=%s wifi=%d owner=%s repo=%s\n",
+      Serial.printf(">>STATUS configured=%d lat=%.4f lon=%.4f fw=%s wifi=%d owner=%s repo=%s pat=%d\n",
                      locationConfigured ? 1 : 0, userLat, userLon, FIRMWARE_VERSION, wifiConfigured ? 1 : 0,
-                     OTA_GITHUB_OWNER, OTA_GITHUB_REPO);
+                     OTA_GITHUB_OWNER, OTA_GITHUB_REPO, githubPatConfigured ? 1 : 0);
     } else if (strcmp(lineBuf, "CFG GET_OTA_STATUS") == 0) {
-      Serial.printf(">>OTA_STATUS failed=%d attempted=%s reason=%s detail=%s at=%ld\n",
+      Serial.printf(">>OTA_STATUS failed=%d attempted=%s reason=%s detail=%s at=%ld reported=%d\n",
                      otaHealth.hasFailure() ? 1 : 0, otaHealth.failureAttemptedVersion().c_str(),
                      otaHealth.failureReason().c_str(), otaHealth.failureDetail().c_str(),
-                     (long)otaHealth.failureTime());
+                     (long)otaHealth.failureTime(), otaHealth.failureReported() ? 1 : 0);
     } else if (strcmp(lineBuf, "CFG CLEAR_OTA_STATUS") == 0) {
       otaHealth.clearFailure();
       Serial.println(">>OK CLEAR_OTA_STATUS");
+    } else if (strcmp(lineBuf, "CFG GET_OTA_LOG") == 0) {
+      Serial.print(">>OTA_LOG ");
+      Serial.println(escapeOtaLog(otaLogBuf));
+    } else if (strncmp(lineBuf, "CFG SET_GH_PAT ", sizeof("CFG SET_GH_PAT ") - 1) == 0) {
+      const char *pat = lineBuf + (sizeof("CFG SET_GH_PAT ") - 1);
+      if (strlen(pat) == 0 || strlen(pat) > sizeof(userGithubPat) - 1) {
+        Serial.println(">>ERR RANGE");
+      } else {
+        saveGithubPat(pat);
+        Serial.println(">>OK SET_GH_PAT");
+      }
+    } else if (strcmp(lineBuf, "CFG CLEAR_GH_PAT") == 0) {
+      clearGithubPat();
+      Serial.println(">>OK CLEAR_GH_PAT");
     } else if (strncmp(lineBuf, "CFG SET_LOCATION ", 17) == 0) {
       float lat, lon;
       if (sscanf(lineBuf + 17, "%f %f", &lat, &lon) == 2) {
@@ -1043,7 +1169,7 @@ bool fetchLatestRelease(String &tagOut, String &assetUrlOut) {
   http.addHeader("Accept", "application/vnd.github+json");
   int httpCode = http.GET();
   if (httpCode != 200) {
-    Serial.printf("GitHub release check HTTP error: %d\n", httpCode);
+    otaLog("GitHub release check HTTP error: %d", httpCode);
     http.end();
     return false;
   }
@@ -1071,7 +1197,7 @@ bool fetchLatestRelease(String &tagOut, String &assetUrlOut) {
     idx = payload.indexOf("\"browser_download_url\":\"", end);
   }
 
-  Serial.println("GitHub release: no .bin asset found");
+  otaLog("GitHub release: no .bin asset found");
   return false;
 }
 
@@ -1102,7 +1228,7 @@ bool downloadAndFlashFirmware(const String &url, String &errorDetailOut) {
 
   int httpCode = http.GET();
   if (httpCode != 200) {
-    Serial.printf("Firmware download HTTP error: %d\n", httpCode);
+    otaLog("Firmware download HTTP error: %d", httpCode);
     errorDetailOut = String("download_http_") + httpCode;
     http.end();
     return false;
@@ -1110,7 +1236,7 @@ bool downloadAndFlashFirmware(const String &url, String &errorDetailOut) {
 
   int len = http.getSize();
   if (!Update.begin(len > 0 ? (size_t)len : UPDATE_SIZE_UNKNOWN)) {
-    Serial.printf("Update.begin failed: %s\n", Update.errorString());
+    otaLog("Update.begin failed: %s", Update.errorString());
     errorDetailOut = String("update_begin_") + Update.errorString();
     sanitizeToken(errorDetailOut);
     http.end();
@@ -1122,13 +1248,13 @@ bool downloadAndFlashFirmware(const String &url, String &errorDetailOut) {
   http.end();
 
   if (!ok) {
-    Serial.printf("Firmware update failed (%u bytes written): %s\n", (unsigned)written, Update.errorString());
+    otaLog("Firmware update failed (%u bytes written): %s", (unsigned)written, Update.errorString());
     errorDetailOut = String("write_") + (long)written + "of" + len + "_" + Update.errorString();
     sanitizeToken(errorDetailOut);
     return false;
   }
 
-  Serial.printf("Firmware update written (%u bytes)\n", (unsigned)written);
+  otaLog("Firmware update written (%u bytes)", (unsigned)written);
   return true;
 }
 
@@ -1161,7 +1287,7 @@ void checkForFirmwareUpdate(bool forceCheck = false) {
   }
   if (WiFi.status() != WL_CONNECTED) return;
 
-  Serial.println("Checking GitHub for newer firmware...");
+  otaLog("Checking GitHub for newer firmware...");
   String tag, assetUrl;
   if (!fetchLatestRelease(tag, assetUrl)) return;
 
@@ -1171,11 +1297,11 @@ void checkForFirmwareUpdate(bool forceCheck = false) {
   }
 
   if (strcmp(otaFailedVersion, tag.c_str()) == 0 && otaFailCount >= OTA_MAX_UPDATE_ATTEMPTS) {
-    Serial.printf("Skipping %s — already failed %u time(s)\n", tag.c_str(), otaFailCount);
+    otaLog("Skipping %s - already failed %u time(s)", tag.c_str(), otaFailCount);
     return;
   }
 
-  Serial.printf("New firmware available: %s (current %s)\n", tag.c_str(), FIRMWARE_VERSION);
+  otaLog("New firmware available: %s (current %s)", tag.c_str(), FIRMWARE_VERSION);
 
 #ifdef EPAPER_ENABLE
   drawUpdateScreen(tag);
@@ -1188,7 +1314,7 @@ void checkForFirmwareUpdate(bool forceCheck = false) {
     otaFailedVersion[0] = '\0';
     otaHealth.clearFailure();  // this attempt is flashing cleanly — drop any stale record
     otaHealth.recordOtaAttempt(FIRMWARE_VERSION, tag);
-    Serial.println("Update installed — restarting");
+    otaLog("Update installed - restarting");
     Serial.flush();
     delay(200);
     ESP.restart();
@@ -1202,6 +1328,78 @@ void checkForFirmwareUpdate(bool forceCheck = false) {
     }
     String detail = errorDetail + "_attempt" + otaFailCount;
     otaHealth.recordFailure("download_flash", tag, detail);
+  }
+}
+
+// Escapes '"' and '\' and turns embedded newlines into "\n" so `s` is safe
+// to embed as a JSON string value. Only used for the two short, fully
+// device-controlled fields (title/body) in reportOtaFailureToGitHub()'s
+// request body below, so a hand-rolled escaper is enough — no need to pull
+// in a JSON library for that.
+String jsonEscape(const String &s) {
+  String out;
+  char buf[2] = {0, 0};
+  for (int i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '"' || c == '\\') {
+      buf[0] = c;
+      out = out + "\\" + buf;
+    } else if (c == '\n') {
+      out = out + "\\n";
+    } else {
+      buf[0] = c;
+      out = out + buf;
+    }
+  }
+  return out;
+}
+
+// Best-effort auto-report of the current OTA failure as a GitHub issue,
+// using the user-provisioned personal access token (CFG SET_GH_PAT — see
+// handleSerialProvisioning() and "OTA failure reporting" in CLAUDE.md). This
+// is the opt-in alternative to the click-to-report flow in
+// docs/provision.html for anyone who's provisioned a token; that flow keeps
+// working either way. No-op — left for the next wake to retry, since
+// otaHealth.failureReported() stays false — if there's no PAT, no WiFi, or
+// the request itself fails.
+void reportOtaFailureToGitHub() {
+  if (!githubPatConfigured) return;
+  if (!otaHealth.hasFailure() || otaHealth.failureReported()) return;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+  }
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  String title = String("OTA update failed: ") + otaHealth.failureReason() +
+                 " (attempted " + otaHealth.failureAttemptedVersion() + ")";
+  String body = String("**Reason:** ") + otaHealth.failureReason() + "\n" +
+                "**Attempted version:** " + otaHealth.failureAttemptedVersion() + "\n" +
+                "**Running firmware:** " + FIRMWARE_VERSION + "\n" +
+                "**Detail:** " + otaHealth.failureDetail() + "\n" +
+                "**Recorded at (epoch):** " + (long)otaHealth.failureTime() + "\n\n" +
+                "_Filed automatically by the device via its provisioned GitHub token — see " +
+                "CFG GET_OTA_LOG over serial for the surrounding log trail._";
+  String json = String("{\"title\":\"") + jsonEscape(title) + "\",\"body\":\"" + jsonEscape(body) + "\"}";
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  String url = String("https://api.github.com/repos/") + OTA_GITHUB_OWNER + "/" + OTA_GITHUB_REPO + "/issues";
+  http.begin(client, url.c_str());
+  http.addHeader("User-Agent", "epaper-clock-ota");
+  http.addHeader("Accept", "application/vnd.github+json");
+  http.addHeader("Authorization", (String("Bearer ") + userGithubPat).c_str());
+  http.addHeader("Content-Type", "application/json");
+
+  int httpCode = http.POST(json);
+  http.end();
+
+  if (httpCode == 201) {
+    otaLog("OTA failure reported to GitHub");
+    otaHealth.markFailureReported();
+  } else {
+    otaLog("OTA failure report to GitHub failed: HTTP %d", httpCode);
   }
 }
 
@@ -1256,6 +1454,7 @@ void setup() {
 
   loadLocationConfig();
   loadWifiConfig();
+  loadGithubPat();
 
   // One-time migration: a device updating from older firmware that had real
   // WiFi credentials compiled in lands here with NVS still unconfigured.
@@ -1398,6 +1597,12 @@ void setup() {
     // on the usual night-window/24h-throttle gate.
     bool freshStart = (esp_reset_reason() != ESP_RST_DEEPSLEEP);
     checkForFirmwareUpdate(freshStart);  // may flash new firmware and reboot; does not return in that case
+    // Independent of the night-window/throttle gate above: tries once per
+    // wake to auto-file any not-yet-reported OTA failure (including one
+    // recorded earlier this boot by otaHealth.checkBootHealth(), before WiFi
+    // was up) — no-ops immediately if no PAT is provisioned or nothing's
+    // pending. See "OTA failure reporting" in CLAUDE.md.
+    reportOtaFailureToGitHub();
     lastVoltage = voltage;
     refreshClockDisplay(lastVoltage);
   }

@@ -12,6 +12,7 @@ static const char* KEY_FAIL_REASON = "fail_reason";
 static const char* KEY_FAIL_ATTEMPTED = "fail_attempted";
 static const char* KEY_FAIL_DETAIL = "fail_detail";
 static const char* KEY_FAIL_TIME = "fail_time";
+static const char* KEY_FAIL_REPORTED = "fail_reported";
 
 static const char* resetReasonToString(esp_reset_reason_t reason) {
     switch (reason) {
@@ -46,6 +47,7 @@ void OtaHealth::loadFromNVS() {
     failureAttempted_ = prefs_.getString(KEY_FAIL_ATTEMPTED, "");
     failureDetail_ = prefs_.getString(KEY_FAIL_DETAIL, "");
     failureTime_ = (time_t)prefs_.getUInt(KEY_FAIL_TIME, 0);
+    failureReported_ = prefs_.getBool(KEY_FAIL_REPORTED, false);
     failurePresent_ = failureReason_.length() > 0;
     prefs_.end();
 }
@@ -70,19 +72,36 @@ void OtaHealth::clearPendingOta() {
 }
 
 void OtaHealth::recordFailure(const String& reason, const String& attemptedVersion, const String& detail) {
+    // A retry of the *same* failure (same reason + attempted version, just an
+    // updated detail/attempt count) keeps whatever `reported` state it had;
+    // a genuinely new one (different reason or version) gets a clean slate
+    // so reportOtaFailureToGitHub() knows to file it.
+    bool isNewEpisode = !failurePresent_ ||
+                         strcmp(reason.c_str(), failureReason_.c_str()) != 0 ||
+                         strcmp(attemptedVersion.c_str(), failureAttempted_.c_str()) != 0;
     failurePresent_ = true;
     failureReason_ = reason;
     failureAttempted_ = attemptedVersion;
     failureDetail_ = detail;
     failureTime_ = time(nullptr);
+    if (isNewEpisode) failureReported_ = false;
     prefs_.begin(NVS_NAMESPACE, false);
     prefs_.putString(KEY_FAIL_REASON, failureReason_);
     prefs_.putString(KEY_FAIL_ATTEMPTED, failureAttempted_);
     prefs_.putString(KEY_FAIL_DETAIL, failureDetail_);
     prefs_.putUInt(KEY_FAIL_TIME, (uint32_t)failureTime_);
+    prefs_.putBool(KEY_FAIL_REPORTED, failureReported_);
     prefs_.end();
     Serial.printf("OtaHealth: recorded failure reason=%s attempted=%s detail=%s\n",
                   failureReason_.c_str(), failureAttempted_.c_str(), failureDetail_.c_str());
+}
+
+void OtaHealth::markFailureReported() {
+    if (!failurePresent_ || failureReported_) return;
+    failureReported_ = true;
+    prefs_.begin(NVS_NAMESPACE, false);
+    prefs_.putBool(KEY_FAIL_REPORTED, true);
+    prefs_.end();
 }
 
 void OtaHealth::clearFailure() {
@@ -92,11 +111,13 @@ void OtaHealth::clearFailure() {
     failureAttempted_ = "";
     failureDetail_ = "";
     failureTime_ = 0;
+    failureReported_ = false;
     prefs_.begin(NVS_NAMESPACE, false);
     prefs_.remove(KEY_FAIL_REASON);
     prefs_.remove(KEY_FAIL_ATTEMPTED);
     prefs_.remove(KEY_FAIL_DETAIL);
     prefs_.remove(KEY_FAIL_TIME);
+    prefs_.remove(KEY_FAIL_REPORTED);
     prefs_.end();
 }
 

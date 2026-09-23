@@ -65,6 +65,16 @@ public:
     time_t failureTime() const { return failureTime_; }
     void clearFailure();
 
+    // Whether reportOtaFailureToGitHub() (src/main.cpp) has already
+    // auto-filed a GitHub issue for the *current* failure. recordFailure()
+    // resets this to false only when the (reason, attemptedVersion) pair
+    // actually changes — i.e. a genuinely new failure — not on every retry
+    // of the same one, and it's NVS-backed like the rest of the failure
+    // record so a power cycle can't cause a duplicate issue to be filed for
+    // what's still the same underlying failure.
+    bool failureReported() const { return failureReported_; }
+    void markFailureReported();
+
 private:
     Preferences prefs_;
     String pendingVersion_;   // version we OTA'd to but haven't confirmed yet ("" = none pending)
@@ -76,6 +86,7 @@ private:
     String failureAttempted_;
     String failureDetail_;
     time_t failureTime_ = 0;
+    bool failureReported_ = false;
 
     void loadFromNVS();
     void savePendingOta();

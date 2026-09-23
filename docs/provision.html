@@ -142,6 +142,7 @@
     <p id="otaSummary" class="status-line err"></p>
     <div class="actions">
       <button id="otaReportBtn" class="primary">Report on GitHub</button>
+      <button id="otaLogBtn">Download log</button>
       <button id="otaDismissBtn">Dismiss</button>
     </div>
   </div>
@@ -158,6 +159,24 @@
       <label for="pass">Password</label>
       <input type="password" id="pass" placeholder="Leave blank for an open network" autocomplete="off">
       <p class="hint">Only sent if you edit the network name or type a password — the device's stored password is never shown here.</p>
+    </div>
+
+    <h2 class="section">GitHub auto-report (optional)</h2>
+    <div class="field">
+      <label for="ghPat">Personal access token</label>
+      <input type="password" id="ghPat" placeholder="Leave blank to keep current setting" autocomplete="off">
+      <p class="hint">
+        Lets the device file a GitHub issue itself when an OTA update fails, instead of you clicking
+        "Report on GitHub" by hand. A fine-grained token scoped to just <strong>Issues: write</strong>
+        on this repo is enough. <strong>Stored on the device in plaintext</strong> — NVS isn't encrypted,
+        so anyone with physical or USB access to the device could extract it. Only set this if you're
+        comfortable with that tradeoff; the click-to-report flow above works either way. Never echoed
+        back here once saved.
+      </p>
+    </div>
+    <p id="ghPatState" class="status-line"></p>
+    <div class="actions">
+      <button id="ghPatClearBtn">Clear stored token</button>
     </div>
 
     <h2 class="section">Location</h2>
@@ -201,9 +220,13 @@
   const otaPanel = document.getElementById('otaPanel');
   const otaSummary = document.getElementById('otaSummary');
   const otaReportBtn = document.getElementById('otaReportBtn');
+  const otaLogBtn = document.getElementById('otaLogBtn');
   const otaDismissBtn = document.getElementById('otaDismissBtn');
   const ssidInput = document.getElementById('ssid');
   const passInput = document.getElementById('pass');
+  const ghPatInput = document.getElementById('ghPat');
+  const ghPatState = document.getElementById('ghPatState');
+  const ghPatClearBtn = document.getElementById('ghPatClearBtn');
   const latInput = document.getElementById('lat');
   const lonInput = document.getElementById('lon');
   const geoBtn = document.getElementById('geoBtn');
@@ -262,6 +285,9 @@
   let deviceRepo = '';
   let deviceFw = '';
   let lastOtaStatus = null;
+  // Unescaped otaLogBuf text for the current failure, fetched alongside its
+  // status — see refreshOtaStatus() — and handed to otaLogBtn's download.
+  let lastOtaLogText = '';
 
   const OTA_REASON_LABELS = {
     download_flash: 'Downloading or flashing the new firmware failed',
@@ -339,12 +365,27 @@
   }
 
   function parseOtaStatus(reply) {
-    // "OTA_STATUS failed=1 attempted=0.9.13 reason=download_flash detail=download_http_404_attempt1 at=1737480000"
+    // "OTA_STATUS failed=1 attempted=0.9.13 reason=download_flash detail=download_http_404_attempt1 at=1737480000 reported=0"
     const out = {};
     reply.replace(/^OTA_STATUS\s+/, '').split(/\s+/).forEach(pair => {
       const [k, v] = pair.split('=');
       if (k) out[k] = v;
     });
+    return out;
+  }
+
+  // Reverses the device's escapeOtaLog() (src/main.cpp): '\n' -> newline,
+  // '\\' -> '\', anything else passed through as-is.
+  function unescapeOtaLog(s) {
+    let out = '';
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === '\\' && i + 1 < s.length && (s[i + 1] === 'n' || s[i + 1] === '\\')) {
+        out += s[i + 1] === 'n' ? '\n' : '\\';
+        i++;
+      } else {
+        out += s[i];
+      }
+    }
     return out;
   }
 
@@ -356,10 +397,18 @@
         lastOtaStatus = st;
         const when = st.at && st.at !== '0' ? new Date(st.at * 1000).toLocaleString() : 'unknown time';
         const label = OTA_REASON_LABELS[st.reason] || st.reason || 'unknown reason';
-        otaSummary.textContent = `${label} (attempted ${st.attempted || '?'}, ${when}). Detail: ${st.detail || 'n/a'}`;
+        otaSummary.textContent = `${label} (attempted ${st.attempted || '?'}, ${when}). Detail: ${st.detail || 'n/a'}` +
+          (st.reported === '1' ? ' — already auto-reported to GitHub.' : '');
         otaPanel.classList.remove('hidden');
+        try {
+          const logReply = await sendCommand('CFG GET_OTA_LOG');
+          lastOtaLogText = unescapeOtaLog(logReply.replace(/^OTA_LOG /, ''));
+        } catch (e) {
+          lastOtaLogText = '';
+        }
       } else {
         lastOtaStatus = null;
+        lastOtaLogText = '';
         otaPanel.classList.add('hidden');
       }
     } catch (e) {
@@ -397,6 +446,10 @@
 
       deviceInfo.textContent = `Firmware ${st.fw || '?'} — WiFi ${wifiLabel} — location ` +
         (configured ? `set (${st.lat}, ${st.lon})` : 'not set');
+
+      ghPatState.textContent = st.pat === '1'
+        ? 'A GitHub token is currently stored on the device.'
+        : 'No GitHub token stored — OTA failures are only reportable by hand, above.';
 
       await refreshOtaStatus();
     } catch (e) {
@@ -448,6 +501,13 @@
       ? new Date(lastOtaStatus.at * 1000).toLocaleString() : 'unknown time';
     const title = `OTA update failed: ${lastOtaStatus.reason || 'unknown'} ` +
       `(attempted ${lastOtaStatus.attempted || '?'})`;
+    // GitHub's issue-creation URL silently truncates long bodies, so only a
+    // tail of the log fits here — "Download log" below gets the whole thing
+    // for attaching by hand if it matters.
+    const LOG_TAIL_CHARS = 1500;
+    const logTail = lastOtaLogText.length > LOG_TAIL_CHARS
+      ? '…(truncated — see "Download log")…\n' + lastOtaLogText.slice(-LOG_TAIL_CHARS)
+      : lastOtaLogText;
     const body = [
       `**What happened:** ${label}`,
       `**Attempted version:** ${lastOtaStatus.attempted || '?'}`,
@@ -455,11 +515,23 @@
       `**Detail:** ${lastOtaStatus.detail || 'n/a'}`,
       `**Recorded at:** ${when}`,
       '',
+      logTail ? '**Recent OTA log:**\n```\n' + logTail + '\n```' : '',
+      '',
       '<!-- Add anything else you noticed (e.g. what the device was doing) here -->',
     ].join('\n');
     const url = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/new` +
       `?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
     window.open(url, '_blank', 'noopener');
+  });
+
+  otaLogBtn.addEventListener('click', () => {
+    const blob = new Blob([lastOtaLogText || '(no log captured for this failure)'], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ota-log-${Date.now()}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   });
 
   otaDismissBtn.addEventListener('click', async () => {
@@ -469,6 +541,16 @@
       otaPanel.classList.add('hidden');
     } catch (e) {
       log('meta', 'Failed to clear OTA status: ' + e.message);
+    }
+  });
+
+  ghPatClearBtn.addEventListener('click', async () => {
+    try {
+      await sendCommand('CFG CLEAR_GH_PAT');
+      ghPatInput.value = '';
+      await refreshStatus();
+    } catch (e) {
+      log('meta', 'Failed to clear GitHub token: ' + e.message);
     }
   });
 
@@ -505,8 +587,13 @@
     const lon = parseFloat(lonRaw);
     const wantsLocation = latRaw.length > 0 && lonRaw.length > 0 && !Number.isNaN(lat) && !Number.isNaN(lon);
 
-    if (!wantsWifi && !wantsLocation) {
-      saveResult.textContent = 'Enter a WiFi network and/or both latitude and longitude.';
+    // Never prefilled (see the GitHub auto-report hint), so any non-empty
+    // value here is a real edit.
+    const pat = ghPatInput.value.trim();
+    const wantsPat = pat.length > 0;
+
+    if (!wantsWifi && !wantsLocation && !wantsPat) {
+      saveResult.textContent = 'Enter a WiFi network, a GitHub token, and/or both latitude and longitude.';
       saveResult.className = 'status-line err';
       return;
     }
@@ -521,6 +608,10 @@
         const passReply = await sendCommand(`CFG SET_WIFI_PASS ${pass}`);
         if (passReply !== 'OK SET_WIFI_PASS') throw new Error('WiFi password rejected: ' + passReply);
       }
+      if (wantsPat) {
+        const patReply = await sendCommand(`CFG SET_GH_PAT ${pat}`);
+        if (patReply !== 'OK SET_GH_PAT') throw new Error('GitHub token rejected: ' + patReply);
+      }
       if (wantsLocation) {
         const locReply = await sendCommand(`CFG SET_LOCATION ${lat} ${lon}`);
         if (locReply !== 'OK SET_LOCATION') throw new Error('Location rejected: ' + locReply);
@@ -528,6 +619,7 @@
 
       await refreshStatus();
       passInput.value = '';
+      ghPatInput.value = '';
       saveResult.textContent = 'Saved — rebooting device to show the clock…';
       saveResult.className = 'status-line ok';
       try {
