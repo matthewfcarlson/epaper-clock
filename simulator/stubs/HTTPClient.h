@@ -18,8 +18,8 @@ struct HTTPClient {
     void addHeader(const char *, const char *)      {}
     void setFollowRedirects(followRedirects_t)      {}
     int  GET()                                      { return 200; }
-    // Auto-reporting (reportOtaFailureToGitHub() in main.cpp) never actually
-    // fires in the simulator — no PAT is ever provisioned, since Serial
+    // Auto-reporting (reportOtaFailure() in main.cpp) never actually fires
+    // in the simulator — no relay token is ever provisioned, since Serial
     // input is stubbed to report "no input" (see "Key simulator behaviors"
     // in CLAUDE.md) — so this only needs to exist for compilation.
     int  POST(const String &)                       { return 201; }

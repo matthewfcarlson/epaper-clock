@@ -161,22 +161,24 @@
       <p class="hint">Only sent if you edit the network name or type a password — the device's stored password is never shown here.</p>
     </div>
 
-    <h2 class="section">GitHub auto-report (optional)</h2>
+    <h2 class="section">OTA-failure auto-report (optional)</h2>
     <div class="field">
-      <label for="ghPat">Personal access token</label>
-      <input type="password" id="ghPat" placeholder="Leave blank to keep current setting" autocomplete="off">
+      <label for="reportToken">Relay shared secret</label>
+      <input type="password" id="reportToken" placeholder="Leave blank to keep current setting" autocomplete="off">
       <p class="hint">
         Lets the device file a GitHub issue itself when an OTA update fails, instead of you clicking
-        "Report on GitHub" by hand. A fine-grained token scoped to just <strong>Issues: write</strong>
-        on this repo is enough. <strong>Stored on the device in plaintext</strong> — NVS isn't encrypted,
-        so anyone with physical or USB access to the device could extract it. Only set this if you're
-        comfortable with that tradeoff; the click-to-report flow above works either way. Never echoed
-        back here once saved.
+        "Report on GitHub" by hand — via a small relay (see <code>cloudflare-worker/</code> in the repo)
+        rather than a GitHub credential on the device itself. This secret only ever authorizes a POST to
+        that relay's one rate-limited endpoint; it can't act on GitHub directly, unlike a GitHub token
+        would. <strong>Still stored on the device in plaintext</strong> (NVS isn't encrypted), so treat it
+        as a real secret, just a much lower-value one to lose. Only meaningful if the relay is deployed
+        and its URL is compiled in (<code>OTA_REPORT_ENDPOINT</code>) — the click-to-report flow above
+        works regardless. Never echoed back here once saved.
       </p>
     </div>
-    <p id="ghPatState" class="status-line"></p>
+    <p id="reportTokenState" class="status-line"></p>
     <div class="actions">
-      <button id="ghPatClearBtn">Clear stored token</button>
+      <button id="reportTokenClearBtn">Clear stored token</button>
     </div>
 
     <h2 class="section">Location</h2>
@@ -224,9 +226,9 @@
   const otaDismissBtn = document.getElementById('otaDismissBtn');
   const ssidInput = document.getElementById('ssid');
   const passInput = document.getElementById('pass');
-  const ghPatInput = document.getElementById('ghPat');
-  const ghPatState = document.getElementById('ghPatState');
-  const ghPatClearBtn = document.getElementById('ghPatClearBtn');
+  const reportTokenInput = document.getElementById('reportToken');
+  const reportTokenState = document.getElementById('reportTokenState');
+  const reportTokenClearBtn = document.getElementById('reportTokenClearBtn');
   const latInput = document.getElementById('lat');
   const lonInput = document.getElementById('lon');
   const geoBtn = document.getElementById('geoBtn');
@@ -447,9 +449,9 @@
       deviceInfo.textContent = `Firmware ${st.fw || '?'} — WiFi ${wifiLabel} — location ` +
         (configured ? `set (${st.lat}, ${st.lon})` : 'not set');
 
-      ghPatState.textContent = st.pat === '1'
-        ? 'A GitHub token is currently stored on the device.'
-        : 'No GitHub token stored — OTA failures are only reportable by hand, above.';
+      reportTokenState.textContent = st.report === '1'
+        ? 'A relay shared secret is currently stored on the device.'
+        : 'No relay secret stored — OTA failures are only reportable by hand, above.';
 
       await refreshOtaStatus();
     } catch (e) {
@@ -544,13 +546,13 @@
     }
   });
 
-  ghPatClearBtn.addEventListener('click', async () => {
+  reportTokenClearBtn.addEventListener('click', async () => {
     try {
-      await sendCommand('CFG CLEAR_GH_PAT');
-      ghPatInput.value = '';
+      await sendCommand('CFG CLEAR_REPORT_TOKEN');
+      reportTokenInput.value = '';
       await refreshStatus();
     } catch (e) {
-      log('meta', 'Failed to clear GitHub token: ' + e.message);
+      log('meta', 'Failed to clear relay secret: ' + e.message);
     }
   });
 
@@ -587,13 +589,13 @@
     const lon = parseFloat(lonRaw);
     const wantsLocation = latRaw.length > 0 && lonRaw.length > 0 && !Number.isNaN(lat) && !Number.isNaN(lon);
 
-    // Never prefilled (see the GitHub auto-report hint), so any non-empty
-    // value here is a real edit.
-    const pat = ghPatInput.value.trim();
-    const wantsPat = pat.length > 0;
+    // Never prefilled (see the auto-report hint), so any non-empty value
+    // here is a real edit.
+    const reportToken = reportTokenInput.value.trim();
+    const wantsReportToken = reportToken.length > 0;
 
-    if (!wantsWifi && !wantsLocation && !wantsPat) {
-      saveResult.textContent = 'Enter a WiFi network, a GitHub token, and/or both latitude and longitude.';
+    if (!wantsWifi && !wantsLocation && !wantsReportToken) {
+      saveResult.textContent = 'Enter a WiFi network, a relay secret, and/or both latitude and longitude.';
       saveResult.className = 'status-line err';
       return;
     }
@@ -608,9 +610,9 @@
         const passReply = await sendCommand(`CFG SET_WIFI_PASS ${pass}`);
         if (passReply !== 'OK SET_WIFI_PASS') throw new Error('WiFi password rejected: ' + passReply);
       }
-      if (wantsPat) {
-        const patReply = await sendCommand(`CFG SET_GH_PAT ${pat}`);
-        if (patReply !== 'OK SET_GH_PAT') throw new Error('GitHub token rejected: ' + patReply);
+      if (wantsReportToken) {
+        const tokenReply = await sendCommand(`CFG SET_REPORT_TOKEN ${reportToken}`);
+        if (tokenReply !== 'OK SET_REPORT_TOKEN') throw new Error('Relay secret rejected: ' + tokenReply);
       }
       if (wantsLocation) {
         const locReply = await sendCommand(`CFG SET_LOCATION ${lat} ${lon}`);
@@ -619,7 +621,7 @@
 
       await refreshStatus();
       passInput.value = '';
-      ghPatInput.value = '';
+      reportTokenInput.value = '';
       saveResult.textContent = 'Saved — rebooting device to show the clock…';
       saveResult.className = 'status-line ok';
       try {

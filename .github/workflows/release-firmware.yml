@@ -81,10 +81,18 @@ jobs:
       # credentials — a freshly flashed device must be provisioned once over
       # serial (see docs/provision.html / CLAUDE.md's "Location & WiFi
       # provisioning").
+      #
+      # OTA_REPORT_ENDPOINT isn't sensitive (it's just the deployed
+      # cloudflare-worker/ URL, see CLAUDE.md's "OTA failure reporting"), but
+      # is pulled from a repo secret anyway for consistency with the rest of
+      # this step. Fine to leave that secret unset entirely — an empty
+      # OTA_REPORT_ENDPOINT just disables the relay auto-report path (the
+      # click-to-report flow in docs/provision.html is unaffected).
       - name: Write config.h from secrets
         env:
           TZ_INFO: ${{ secrets.TZ_INFO }}
           OWM_API_KEY: ${{ secrets.OWM_API_KEY }}
+          OTA_REPORT_ENDPOINT: ${{ secrets.OTA_REPORT_ENDPOINT }}
         run: |
           repo_name="${GITHUB_REPOSITORY#*/}"
           cat > src/config.h <<EOF
@@ -98,6 +106,7 @@ jobs:
           const bool OTA_UPDATES_ENABLED = true;
           const char *OTA_GITHUB_OWNER = "${{ github.repository_owner }}";
           const char *OTA_GITHUB_REPO = "$repo_name";
+          const char *OTA_REPORT_ENDPOINT = "$OTA_REPORT_ENDPOINT";
           EOF
 
       - name: Build firmware

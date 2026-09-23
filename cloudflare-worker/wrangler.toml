@@ -1,0 +1,23 @@
+name = "epaper-clock-ota-relay"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Not secret — just the repo this relay files issues against — but see
+# README.md before assuming the placeholders below are safe to deploy as-is.
+[vars]
+GITHUB_OWNER = "your_github_username"
+GITHUB_REPO = "your_repo_name"
+
+# Create with `wrangler kv namespace create OTA_RELAY_KV`, then replace `id`
+# below with the id it prints. Used for rate-limit counters and the cached
+# GitHub App installation token (see src/index.js).
+[[kv_namespaces]]
+binding = "OTA_RELAY_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# Secrets (never go in this file — set via `wrangler secret put <NAME>`,
+# see README.md):
+#   GITHUB_APP_ID
+#   GITHUB_APP_INSTALLATION_ID
+#   GITHUB_APP_PRIVATE_KEY
+#   REPORT_SHARED_SECRET

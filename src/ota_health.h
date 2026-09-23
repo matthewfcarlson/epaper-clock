@@ -65,7 +65,7 @@ public:
     time_t failureTime() const { return failureTime_; }
     void clearFailure();
 
-    // Whether reportOtaFailureToGitHub() (src/main.cpp) has already
+    // Whether reportOtaFailure() (src/main.cpp) has already
     // auto-filed a GitHub issue for the *current* failure. recordFailure()
     // resets this to false only when the (reason, attemptedVersion) pair
     // actually changes — i.e. a genuinely new failure — not on every retry

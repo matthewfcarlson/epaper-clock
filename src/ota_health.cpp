@@ -75,7 +75,7 @@ void OtaHealth::recordFailure(const String& reason, const String& attemptedVersi
     // A retry of the *same* failure (same reason + attempted version, just an
     // updated detail/attempt count) keeps whatever `reported` state it had;
     // a genuinely new one (different reason or version) gets a clean slate
-    // so reportOtaFailureToGitHub() knows to file it.
+    // so reportOtaFailure() knows to file it.
     bool isNewEpisode = !failurePresent_ ||
                          strcmp(reason.c_str(), failureReason_.c_str()) != 0 ||
                          strcmp(attemptedVersion.c_str(), failureAttempted_.c_str()) != 0;

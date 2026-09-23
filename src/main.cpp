@@ -283,45 +283,46 @@ void saveWifiPass(const char *pass) {
   userWifiPass[sizeof(userWifiPass) - 1] = '\0';
 }
 
-// User-provisioned GitHub personal access token, same NVS namespace as WiFi/
-// location above and same "never compiled into the binary" rationale — this
-// one, however, is an explicit opt-in the user types in themselves (unlike
-// WiFi/location, there's no compiled-in fallback and no migration path).
-// Scoped to just filing an issue (see reportOtaFailureToGitHub() below) —
-// only "Issues: write" on this one repo, if using a fine-grained token, is
-// all it needs. See "OTA failure reporting" in CLAUDE.md for the tradeoff
-// this opts into (a live credential resident in NVS, on unencrypted flash)
-// versus the token-free click-to-report flow in docs/provision.html, which
-// remains available either way.
-char userGithubPat[100] = "";  // classic tokens are ~40 chars, fine-grained ones ~93
-bool githubPatConfigured = false;
+// User-provisioned shared secret for the OTA-failure relay (see
+// reportOtaFailure() below and cloudflare-worker/), same NVS namespace as
+// WiFi/location above. Same "never compiled into the binary" rationale, but
+// an explicit opt-in the user types in themselves (unlike WiFi/location,
+// there's no compiled-in fallback and no migration path). Unlike a GitHub
+// PAT, this secret only ever authorizes a POST to the relay Worker's one
+// rate-limited endpoint — it can't act on GitHub directly, so the blast
+// radius of it being extracted from NVS (unencrypted, like everywhere else
+// in this project) is much smaller. See "OTA failure reporting" in
+// CLAUDE.md. The token-free click-to-report flow in docs/provision.html
+// remains available regardless of whether this is set.
+char userReportToken[65] = "";
+bool reportTokenConfigured = false;
 
-void loadGithubPat() {
+void loadReportToken() {
   prefs.begin("clockcfg", true);
-  githubPatConfigured = prefs.getBool("pat_set", false);
-  String pat = prefs.getString("pat", "");
+  reportTokenConfigured = prefs.getBool("rtok_set", false);
+  String tok = prefs.getString("rtok", "");
   prefs.end();
-  strncpy(userGithubPat, pat.c_str(), sizeof(userGithubPat) - 1);
-  userGithubPat[sizeof(userGithubPat) - 1] = '\0';
+  strncpy(userReportToken, tok.c_str(), sizeof(userReportToken) - 1);
+  userReportToken[sizeof(userReportToken) - 1] = '\0';
 }
 
-void saveGithubPat(const char *pat) {
+void saveReportToken(const char *tok) {
   prefs.begin("clockcfg", false);
-  prefs.putBool("pat_set", true);
-  prefs.putString("pat", pat);
+  prefs.putBool("rtok_set", true);
+  prefs.putString("rtok", tok);
   prefs.end();
-  strncpy(userGithubPat, pat, sizeof(userGithubPat) - 1);
-  userGithubPat[sizeof(userGithubPat) - 1] = '\0';
-  githubPatConfigured = true;
+  strncpy(userReportToken, tok, sizeof(userReportToken) - 1);
+  userReportToken[sizeof(userReportToken) - 1] = '\0';
+  reportTokenConfigured = true;
 }
 
-void clearGithubPat() {
+void clearReportToken() {
   prefs.begin("clockcfg", false);
-  prefs.remove("pat_set");
-  prefs.remove("pat");
+  prefs.remove("rtok_set");
+  prefs.remove("rtok");
   prefs.end();
-  userGithubPat[0] = '\0';
-  githubPatConfigured = false;
+  userReportToken[0] = '\0';
+  reportTokenConfigured = false;
 }
 
 // The credentials connectWiFi() should actually use: NVS-provisioned ones
@@ -338,7 +339,7 @@ bool wifiCredentialsAvailable() { return activeWifiSsid()[0] != '\0'; }
 // same stream. Only active during the button-wake maintenance window and
 // the first-boot awake window (see loop()).
 //   CFG GET_STATUS              -> >>STATUS configured=0|1 lat=<f> lon=<f> fw=<version> wifi=0|1
-//                                    owner=<gh_owner> repo=<gh_repo> pat=0|1
+//                                    owner=<gh_owner> repo=<gh_repo> report=0|1
 //   CFG SET_LOCATION <lat> <lon> -> >>OK SET_LOCATION | >>ERR RANGE|PARSE
 //   CFG GET_WIFI_SSID           -> >>WIFI_SSID <ssid>  (blank when unset)
 //   CFG SET_WIFI_SSID <ssid>    -> >>OK SET_WIFI_SSID | >>ERR RANGE
@@ -352,7 +353,7 @@ bool wifiCredentialsAvailable() { return activeWifiSsid()[0] != '\0'; }
 //     OtaHealth::recordFailure() in ota_health.cpp for who writes it and
 //     "OTA failure reporting" in CLAUDE.md for the full picture. reason/detail
 //     are short machine tokens (no spaces), not free text. reported=1 means
-//     reportOtaFailureToGitHub() already auto-filed this one (see below).
+//     reportOtaFailure() already relayed this one (see below).
 //   CFG CLEAR_OTA_STATUS        -> >>OK CLEAR_OTA_STATUS
 //     Acknowledges/dismisses the current OTA failure record (e.g. after the
 //     user has filed or seen the report) so it stops being surfaced.
@@ -360,14 +361,15 @@ bool wifiCredentialsAvailable() { return activeWifiSsid()[0] != '\0'; }
 //     otaLogBuf's contents (recent OTA-path log lines), with '\' and
 //     newlines escaped (see escapeOtaLog()) so multi-line content still fits
 //     one reply line — unescape client-side before displaying/downloading.
-//   CFG SET_GH_PAT <token>      -> >>OK SET_GH_PAT | >>ERR RANGE
-//     Optional: a GitHub personal access token (fine-grained, "Issues:
-//     write" on this repo is enough), used only by reportOtaFailureToGitHub()
-//     to auto-file an OTA failure as an issue. Never echoed back, same as
-//     the WiFi password. Entirely opt-in — see "OTA failure reporting" in
-//     CLAUDE.md for the tradeoff this accepts versus the token-free
-//     click-to-report flow in docs/provision.html, which works either way.
-//   CFG CLEAR_GH_PAT            -> >>OK CLEAR_GH_PAT
+//   CFG SET_REPORT_TOKEN <tok>  -> >>OK SET_REPORT_TOKEN | >>ERR RANGE
+//     Optional: a shared secret for the OTA-failure relay Worker (see
+//     cloudflare-worker/), used only by reportOtaFailure() to authorize a
+//     POST to that Worker's one rate-limited endpoint — unlike a GitHub
+//     PAT, this can't act on GitHub directly on its own. Never echoed back,
+//     same as the WiFi password. Entirely opt-in — see "OTA failure
+//     reporting" in CLAUDE.md. The token-free click-to-report flow in
+//     docs/provision.html works either way.
+//   CFG CLEAR_REPORT_TOKEN      -> >>OK CLEAR_REPORT_TOKEN
 //   CFG REBOOT                  -> >>OK REBOOT, then restarts immediately into
 //                                   a normal (non-button) wake cycle instead of
 //                                   waiting out the rest of the maintenance window
@@ -389,9 +391,9 @@ void handleSerialProvisioning() {
     if (lineBuf[0] == '\0') continue;
 
     if (strcmp(lineBuf, "CFG GET_STATUS") == 0) {
-      Serial.printf(">>STATUS configured=%d lat=%.4f lon=%.4f fw=%s wifi=%d owner=%s repo=%s pat=%d\n",
+      Serial.printf(">>STATUS configured=%d lat=%.4f lon=%.4f fw=%s wifi=%d owner=%s repo=%s report=%d\n",
                      locationConfigured ? 1 : 0, userLat, userLon, FIRMWARE_VERSION, wifiConfigured ? 1 : 0,
-                     OTA_GITHUB_OWNER, OTA_GITHUB_REPO, githubPatConfigured ? 1 : 0);
+                     OTA_GITHUB_OWNER, OTA_GITHUB_REPO, reportTokenConfigured ? 1 : 0);
     } else if (strcmp(lineBuf, "CFG GET_OTA_STATUS") == 0) {
       Serial.printf(">>OTA_STATUS failed=%d attempted=%s reason=%s detail=%s at=%ld reported=%d\n",
                      otaHealth.hasFailure() ? 1 : 0, otaHealth.failureAttemptedVersion().c_str(),
@@ -403,17 +405,17 @@ void handleSerialProvisioning() {
     } else if (strcmp(lineBuf, "CFG GET_OTA_LOG") == 0) {
       Serial.print(">>OTA_LOG ");
       Serial.println(escapeOtaLog(otaLogBuf));
-    } else if (strncmp(lineBuf, "CFG SET_GH_PAT ", sizeof("CFG SET_GH_PAT ") - 1) == 0) {
-      const char *pat = lineBuf + (sizeof("CFG SET_GH_PAT ") - 1);
-      if (strlen(pat) == 0 || strlen(pat) > sizeof(userGithubPat) - 1) {
+    } else if (strncmp(lineBuf, "CFG SET_REPORT_TOKEN ", sizeof("CFG SET_REPORT_TOKEN ") - 1) == 0) {
+      const char *tok = lineBuf + (sizeof("CFG SET_REPORT_TOKEN ") - 1);
+      if (strlen(tok) == 0 || strlen(tok) > sizeof(userReportToken) - 1) {
         Serial.println(">>ERR RANGE");
       } else {
-        saveGithubPat(pat);
-        Serial.println(">>OK SET_GH_PAT");
+        saveReportToken(tok);
+        Serial.println(">>OK SET_REPORT_TOKEN");
       }
-    } else if (strcmp(lineBuf, "CFG CLEAR_GH_PAT") == 0) {
-      clearGithubPat();
-      Serial.println(">>OK CLEAR_GH_PAT");
+    } else if (strcmp(lineBuf, "CFG CLEAR_REPORT_TOKEN") == 0) {
+      clearReportToken();
+      Serial.println(">>OK CLEAR_REPORT_TOKEN");
     } else if (strncmp(lineBuf, "CFG SET_LOCATION ", 17) == 0) {
       float lat, lon;
       if (sscanf(lineBuf + 17, "%f %f", &lat, &lon) == 2) {
@@ -1332,10 +1334,9 @@ void checkForFirmwareUpdate(bool forceCheck = false) {
 }
 
 // Escapes '"' and '\' and turns embedded newlines into "\n" so `s` is safe
-// to embed as a JSON string value. Only used for the two short, fully
-// device-controlled fields (title/body) in reportOtaFailureToGitHub()'s
-// request body below, so a hand-rolled escaper is enough — no need to pull
-// in a JSON library for that.
+// to embed as a JSON string value. Only used for reportOtaFailure()'s
+// request body fields below, all short and entirely device-controlled, so
+// a hand-rolled escaper is enough — no need to pull in a JSON library.
 String jsonEscape(const String &s) {
   String out;
   char buf[2] = {0, 0};
@@ -1354,16 +1355,20 @@ String jsonEscape(const String &s) {
   return out;
 }
 
-// Best-effort auto-report of the current OTA failure as a GitHub issue,
-// using the user-provisioned personal access token (CFG SET_GH_PAT — see
-// handleSerialProvisioning() and "OTA failure reporting" in CLAUDE.md). This
-// is the opt-in alternative to the click-to-report flow in
-// docs/provision.html for anyone who's provisioned a token; that flow keeps
-// working either way. No-op — left for the next wake to retry, since
-// otaHealth.failureReported() stays false — if there's no PAT, no WiFi, or
-// the request itself fails.
-void reportOtaFailureToGitHub() {
-  if (!githubPatConfigured) return;
+// Best-effort auto-report of the current OTA failure via the OTA-failure
+// relay Cloudflare Worker (see cloudflare-worker/ and "OTA failure
+// reporting" in CLAUDE.md), using the user-provisioned shared secret (CFG
+// SET_REPORT_TOKEN — see handleSerialProvisioning()). The relay — not this
+// device — holds the actual GitHub credential (a GitHub App installation
+// token) and does the dedup/issue-filing; this function's job is just to
+// hand it the failure. This is the opt-in alternative to the click-to-
+// report flow in docs/provision.html for anyone who's deployed the relay;
+// that flow keeps working either way. No-op — left for the next wake to
+// retry, since otaHealth.failureReported() stays false — if the relay
+// endpoint isn't configured, there's no report token, no WiFi, or the
+// request itself fails.
+void reportOtaFailure() {
+  if (OTA_REPORT_ENDPOINT[0] == '\0' || !reportTokenConfigured) return;
   if (!otaHealth.hasFailure() || otaHealth.failureReported()) return;
 
   if (WiFi.status() != WL_CONNECTED) {
@@ -1371,35 +1376,29 @@ void reportOtaFailureToGitHub() {
   }
   if (WiFi.status() != WL_CONNECTED) return;
 
-  String title = String("OTA update failed: ") + otaHealth.failureReason() +
-                 " (attempted " + otaHealth.failureAttemptedVersion() + ")";
-  String body = String("**Reason:** ") + otaHealth.failureReason() + "\n" +
-                "**Attempted version:** " + otaHealth.failureAttemptedVersion() + "\n" +
-                "**Running firmware:** " + FIRMWARE_VERSION + "\n" +
-                "**Detail:** " + otaHealth.failureDetail() + "\n" +
-                "**Recorded at (epoch):** " + (long)otaHealth.failureTime() + "\n\n" +
-                "_Filed automatically by the device via its provisioned GitHub token — see " +
-                "CFG GET_OTA_LOG over serial for the surrounding log trail._";
-  String json = String("{\"title\":\"") + jsonEscape(title) + "\",\"body\":\"" + jsonEscape(body) + "\"}";
+  String json = String("{\"reason\":\"") + jsonEscape(otaHealth.failureReason()) +
+                "\",\"attempted\":\"" + jsonEscape(otaHealth.failureAttemptedVersion()) +
+                "\",\"detail\":\"" + jsonEscape(otaHealth.failureDetail()) +
+                "\",\"fw\":\"" + jsonEscape(FIRMWARE_VERSION) +
+                "\",\"at\":" + (long)otaHealth.failureTime() +
+                ",\"log\":\"" + jsonEscape(otaLogBuf) + "\"}";
 
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
-  String url = String("https://api.github.com/repos/") + OTA_GITHUB_OWNER + "/" + OTA_GITHUB_REPO + "/issues";
-  http.begin(client, url.c_str());
+  http.begin(client, OTA_REPORT_ENDPOINT);
   http.addHeader("User-Agent", "epaper-clock-ota");
-  http.addHeader("Accept", "application/vnd.github+json");
-  http.addHeader("Authorization", (String("Bearer ") + userGithubPat).c_str());
   http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Report-Token", userReportToken);
 
   int httpCode = http.POST(json);
   http.end();
 
-  if (httpCode == 201) {
-    otaLog("OTA failure reported to GitHub");
+  if (httpCode == 200) {
+    otaLog("OTA failure reported via relay");
     otaHealth.markFailureReported();
   } else {
-    otaLog("OTA failure report to GitHub failed: HTTP %d", httpCode);
+    otaLog("OTA failure relay report failed: HTTP %d", httpCode);
   }
 }
 
@@ -1454,7 +1453,7 @@ void setup() {
 
   loadLocationConfig();
   loadWifiConfig();
-  loadGithubPat();
+  loadReportToken();
 
   // One-time migration: a device updating from older firmware that had real
   // WiFi credentials compiled in lands here with NVS still unconfigured.
@@ -1598,11 +1597,12 @@ void setup() {
     bool freshStart = (esp_reset_reason() != ESP_RST_DEEPSLEEP);
     checkForFirmwareUpdate(freshStart);  // may flash new firmware and reboot; does not return in that case
     // Independent of the night-window/throttle gate above: tries once per
-    // wake to auto-file any not-yet-reported OTA failure (including one
-    // recorded earlier this boot by otaHealth.checkBootHealth(), before WiFi
-    // was up) — no-ops immediately if no PAT is provisioned or nothing's
-    // pending. See "OTA failure reporting" in CLAUDE.md.
-    reportOtaFailureToGitHub();
+    // wake to auto-file any not-yet-reported OTA failure via the relay
+    // Worker (including one recorded earlier this boot by
+    // otaHealth.checkBootHealth(), before WiFi was up) — no-ops immediately
+    // if no relay is configured or nothing's pending. See "OTA failure
+    // reporting" in CLAUDE.md.
+    reportOtaFailure();
     lastVoltage = voltage;
     refreshClockDisplay(lastVoltage);
   }
