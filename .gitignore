@@ -2,3 +2,5 @@ src/config.h
 .pio/
 .vscode/
 .DS_Store
+cloudflare-worker/node_modules/
+cloudflare-worker/.wrangler/

@@ -137,6 +137,16 @@
     </div>
   </div>
 
+  <div id="otaPanel" class="panel hidden" style="border-color: var(--err);">
+    <h2 class="section" style="color: var(--err);">OTA update failed</h2>
+    <p id="otaSummary" class="status-line err"></p>
+    <div class="actions">
+      <button id="otaReportBtn" class="primary">Report on GitHub</button>
+      <button id="otaLogBtn">Download log</button>
+      <button id="otaDismissBtn">Dismiss</button>
+    </div>
+  </div>
+
   <div id="configPanel" class="panel hidden">
     <p id="deviceInfo" class="status-line"></p>
 
@@ -149,6 +159,28 @@
       <label for="pass">Password</label>
       <input type="password" id="pass" placeholder="Leave blank for an open network" autocomplete="off">
       <p class="hint">Only sent if you edit the network name or type a password — the device's stored password is never shown here.</p>
+    </div>
+
+    <h2 class="section">OTA-failure auto-report (optional)</h2>
+    <div class="field">
+      <label for="reportToken">Relay shared secret</label>
+      <input type="password" id="reportToken" placeholder="Leave blank to keep current setting" autocomplete="off">
+      <p class="hint">
+        Lets the device file a GitHub issue itself when an OTA update fails, instead of you clicking
+        "Report on GitHub" by hand — via a small relay (see <code>cloudflare-worker/</code> in the repo)
+        rather than a GitHub credential on the device itself. This secret only ever authorizes a POST to
+        that relay's one rate-limited endpoint; it can't act on GitHub directly, unlike a GitHub token
+        would. A release build may already have one compiled in via a repo secret (<code>OTA_REPORT_TOKEN</code>)
+        — entering one here just overrides that in NVS, e.g. to rotate it without reflashing.
+        <strong>Still stored on the device in plaintext</strong> (NVS isn't encrypted), so treat it as a
+        real secret, just a much lower-value one to lose. Only meaningful if the relay is deployed and its
+        URL is compiled in (<code>OTA_REPORT_ENDPOINT</code>) — the click-to-report flow above works
+        regardless. Never echoed back here once saved.
+      </p>
+    </div>
+    <p id="reportTokenState" class="status-line"></p>
+    <div class="actions">
+      <button id="reportTokenClearBtn">Clear stored token</button>
     </div>
 
     <h2 class="section">Location</h2>
@@ -189,8 +221,16 @@
   const connState = document.getElementById('connState');
   const configPanel = document.getElementById('configPanel');
   const deviceInfo = document.getElementById('deviceInfo');
+  const otaPanel = document.getElementById('otaPanel');
+  const otaSummary = document.getElementById('otaSummary');
+  const otaReportBtn = document.getElementById('otaReportBtn');
+  const otaLogBtn = document.getElementById('otaLogBtn');
+  const otaDismissBtn = document.getElementById('otaDismissBtn');
   const ssidInput = document.getElementById('ssid');
   const passInput = document.getElementById('pass');
+  const reportTokenInput = document.getElementById('reportToken');
+  const reportTokenState = document.getElementById('reportTokenState');
+  const reportTokenClearBtn = document.getElementById('reportTokenClearBtn');
   const latInput = document.getElementById('lat');
   const lonInput = document.getElementById('lon');
   const geoBtn = document.getElementById('geoBtn');
@@ -223,6 +263,7 @@
     connectBtn.classList.remove('hidden');
     disconnectBtn.classList.add('hidden');
     configPanel.classList.add('hidden');
+    otaPanel.classList.add('hidden');
   });
 
   if (!('serial' in navigator)) {
@@ -242,6 +283,21 @@
   // one", since the password field can never be prefilled (never echoed
   // back) and we don't want an untouched save to silently blank it out.
   let currentSsid = '';
+  // Repo + running firmware version, read from CFG GET_STATUS, used to build
+  // the prefilled GitHub issue link below.
+  let deviceOwner = '';
+  let deviceRepo = '';
+  let deviceFw = '';
+  let lastOtaStatus = null;
+  // Unescaped otaLogBuf text for the current failure, fetched alongside its
+  // status — see refreshOtaStatus() — and handed to otaLogBtn's download.
+  let lastOtaLogText = '';
+
+  const OTA_REASON_LABELS = {
+    download_flash: 'Downloading or flashing the new firmware failed',
+    boot_rollback: 'The device booted the new firmware but it was rolled back',
+    unconfirmed_boot: 'The new firmware never confirmed itself healthy and was rolled back',
+  };
 
   function setConnState(text, cls) {
     connState.textContent = text;
@@ -312,6 +368,59 @@
     return out;
   }
 
+  function parseOtaStatus(reply) {
+    // "OTA_STATUS failed=1 attempted=0.9.13 reason=download_flash detail=download_http_404_attempt1 at=1737480000 reported=0"
+    const out = {};
+    reply.replace(/^OTA_STATUS\s+/, '').split(/\s+/).forEach(pair => {
+      const [k, v] = pair.split('=');
+      if (k) out[k] = v;
+    });
+    return out;
+  }
+
+  // Reverses the device's escapeOtaLog() (src/main.cpp): '\n' -> newline,
+  // '\\' -> '\', anything else passed through as-is.
+  function unescapeOtaLog(s) {
+    let out = '';
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === '\\' && i + 1 < s.length && (s[i + 1] === 'n' || s[i + 1] === '\\')) {
+        out += s[i + 1] === 'n' ? '\n' : '\\';
+        i++;
+      } else {
+        out += s[i];
+      }
+    }
+    return out;
+  }
+
+  async function refreshOtaStatus() {
+    try {
+      const reply = await sendCommand('CFG GET_OTA_STATUS');
+      const st = parseOtaStatus(reply);
+      if (st.failed === '1') {
+        lastOtaStatus = st;
+        const when = st.at && st.at !== '0' ? new Date(st.at * 1000).toLocaleString() : 'unknown time';
+        const label = OTA_REASON_LABELS[st.reason] || st.reason || 'unknown reason';
+        otaSummary.textContent = `${label} (attempted ${st.attempted || '?'}, ${when}). Detail: ${st.detail || 'n/a'}` +
+          (st.reported === '1' ? ' — already auto-reported to GitHub.' : '');
+        otaPanel.classList.remove('hidden');
+        try {
+          const logReply = await sendCommand('CFG GET_OTA_LOG');
+          lastOtaLogText = unescapeOtaLog(logReply.replace(/^OTA_LOG /, ''));
+        } catch (e) {
+          lastOtaLogText = '';
+        }
+      } else {
+        lastOtaStatus = null;
+        lastOtaLogText = '';
+        otaPanel.classList.add('hidden');
+      }
+    } catch (e) {
+      // Best-effort — don't block the rest of the status refresh on this.
+      log('meta', 'Could not read OTA status: ' + e.message);
+    }
+  }
+
   async function refreshStatus() {
     try {
       const reply = await sendCommand('CFG GET_STATUS');
@@ -321,6 +430,9 @@
         latInput.value = st.lat;
         lonInput.value = st.lon;
       }
+      deviceOwner = st.owner || '';
+      deviceRepo = st.repo || '';
+      deviceFw = st.fw || '';
 
       let wifiLabel = 'not set';
       if (st.wifi === '1') {
@@ -338,6 +450,12 @@
 
       deviceInfo.textContent = `Firmware ${st.fw || '?'} — WiFi ${wifiLabel} — location ` +
         (configured ? `set (${st.lat}, ${st.lon})` : 'not set');
+
+      reportTokenState.textContent = st.report === '1'
+        ? 'A relay shared secret is stored in NVS on the device (overrides any compiled-in default).'
+        : 'No relay secret stored in NVS — auto-report uses the compiled-in default, if the release build set one.';
+
+      await refreshOtaStatus();
     } catch (e) {
       deviceInfo.textContent = 'Connected, but device did not respond — is it in maintenance mode?';
     }
@@ -373,7 +491,70 @@
       connectBtn.classList.remove('hidden');
       disconnectBtn.classList.add('hidden');
       configPanel.classList.add('hidden');
+      otaPanel.classList.add('hidden');
       saveResult.textContent = '';
+    }
+  });
+
+  otaReportBtn.addEventListener('click', () => {
+    if (!lastOtaStatus) return;
+    const owner = deviceOwner || 'OWNER';
+    const repo = deviceRepo || 'REPO';
+    const label = OTA_REASON_LABELS[lastOtaStatus.reason] || lastOtaStatus.reason || 'unknown reason';
+    const when = lastOtaStatus.at && lastOtaStatus.at !== '0'
+      ? new Date(lastOtaStatus.at * 1000).toLocaleString() : 'unknown time';
+    const title = `OTA update failed: ${lastOtaStatus.reason || 'unknown'} ` +
+      `(attempted ${lastOtaStatus.attempted || '?'})`;
+    // GitHub's issue-creation URL silently truncates long bodies, so only a
+    // tail of the log fits here — "Download log" below gets the whole thing
+    // for attaching by hand if it matters.
+    const LOG_TAIL_CHARS = 1500;
+    const logTail = lastOtaLogText.length > LOG_TAIL_CHARS
+      ? '…(truncated — see "Download log")…\n' + lastOtaLogText.slice(-LOG_TAIL_CHARS)
+      : lastOtaLogText;
+    const body = [
+      `**What happened:** ${label}`,
+      `**Attempted version:** ${lastOtaStatus.attempted || '?'}`,
+      `**Running firmware:** ${deviceFw || '?'}`,
+      `**Detail:** ${lastOtaStatus.detail || 'n/a'}`,
+      `**Recorded at:** ${when}`,
+      '',
+      logTail ? '**Recent OTA log:**\n```\n' + logTail + '\n```' : '',
+      '',
+      '<!-- Add anything else you noticed (e.g. what the device was doing) here -->',
+    ].join('\n');
+    const url = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/new` +
+      `?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+    window.open(url, '_blank', 'noopener');
+  });
+
+  otaLogBtn.addEventListener('click', () => {
+    const blob = new Blob([lastOtaLogText || '(no log captured for this failure)'], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ota-log-${Date.now()}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  otaDismissBtn.addEventListener('click', async () => {
+    try {
+      await sendCommand('CFG CLEAR_OTA_STATUS');
+      lastOtaStatus = null;
+      otaPanel.classList.add('hidden');
+    } catch (e) {
+      log('meta', 'Failed to clear OTA status: ' + e.message);
+    }
+  });
+
+  reportTokenClearBtn.addEventListener('click', async () => {
+    try {
+      await sendCommand('CFG CLEAR_REPORT_TOKEN');
+      reportTokenInput.value = '';
+      await refreshStatus();
+    } catch (e) {
+      log('meta', 'Failed to clear relay secret: ' + e.message);
     }
   });
 
@@ -410,8 +591,13 @@
     const lon = parseFloat(lonRaw);
     const wantsLocation = latRaw.length > 0 && lonRaw.length > 0 && !Number.isNaN(lat) && !Number.isNaN(lon);
 
-    if (!wantsWifi && !wantsLocation) {
-      saveResult.textContent = 'Enter a WiFi network and/or both latitude and longitude.';
+    // Never prefilled (see the auto-report hint), so any non-empty value
+    // here is a real edit.
+    const reportToken = reportTokenInput.value.trim();
+    const wantsReportToken = reportToken.length > 0;
+
+    if (!wantsWifi && !wantsLocation && !wantsReportToken) {
+      saveResult.textContent = 'Enter a WiFi network, a relay secret, and/or both latitude and longitude.';
       saveResult.className = 'status-line err';
       return;
     }
@@ -426,6 +612,10 @@
         const passReply = await sendCommand(`CFG SET_WIFI_PASS ${pass}`);
         if (passReply !== 'OK SET_WIFI_PASS') throw new Error('WiFi password rejected: ' + passReply);
       }
+      if (wantsReportToken) {
+        const tokenReply = await sendCommand(`CFG SET_REPORT_TOKEN ${reportToken}`);
+        if (tokenReply !== 'OK SET_REPORT_TOKEN') throw new Error('Relay secret rejected: ' + tokenReply);
+      }
       if (wantsLocation) {
         const locReply = await sendCommand(`CFG SET_LOCATION ${lat} ${lon}`);
         if (locReply !== 'OK SET_LOCATION') throw new Error('Location rejected: ' + locReply);
@@ -433,6 +623,7 @@
 
       await refreshStatus();
       passInput.value = '';
+      reportTokenInput.value = '';
       saveResult.textContent = 'Saved — rebooting device to show the clock…';
       saveResult.className = 'status-line ok';
       try {

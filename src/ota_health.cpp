@@ -2,11 +2,17 @@
 #include "version.h"
 #include <esp_system.h>
 #include <esp_ota_ops.h>
+#include <time.h>
 
 static const char* NVS_NAMESPACE = "ota_health";
 static const char* KEY_PEND_VER = "pend_ver";
 static const char* KEY_PREV_VER = "prev_ver";
 static const char* KEY_ATTEMPTS = "attempts";
+static const char* KEY_FAIL_REASON = "fail_reason";
+static const char* KEY_FAIL_ATTEMPTED = "fail_attempted";
+static const char* KEY_FAIL_DETAIL = "fail_detail";
+static const char* KEY_FAIL_TIME = "fail_time";
+static const char* KEY_FAIL_REPORTED = "fail_reported";
 
 static const char* resetReasonToString(esp_reset_reason_t reason) {
     switch (reason) {
@@ -37,6 +43,12 @@ void OtaHealth::loadFromNVS() {
     pendingVersion_ = prefs_.getString(KEY_PEND_VER, "");
     previousVersion_ = prefs_.getString(KEY_PREV_VER, "");
     bootAttempts_ = prefs_.getUInt(KEY_ATTEMPTS, 0);
+    failureReason_ = prefs_.getString(KEY_FAIL_REASON, "");
+    failureAttempted_ = prefs_.getString(KEY_FAIL_ATTEMPTED, "");
+    failureDetail_ = prefs_.getString(KEY_FAIL_DETAIL, "");
+    failureTime_ = (time_t)prefs_.getUInt(KEY_FAIL_TIME, 0);
+    failureReported_ = prefs_.getBool(KEY_FAIL_REPORTED, false);
+    failurePresent_ = failureReason_.length() > 0;
     prefs_.end();
 }
 
@@ -56,6 +68,56 @@ void OtaHealth::clearPendingOta() {
     prefs_.remove(KEY_PEND_VER);
     prefs_.remove(KEY_PREV_VER);
     prefs_.remove(KEY_ATTEMPTS);
+    prefs_.end();
+}
+
+void OtaHealth::recordFailure(const String& reason, const String& attemptedVersion, const String& detail) {
+    // A retry of the *same* failure (same reason + attempted version, just an
+    // updated detail/attempt count) keeps whatever `reported` state it had;
+    // a genuinely new one (different reason or version) gets a clean slate
+    // so reportOtaFailure() knows to file it.
+    bool isNewEpisode = !failurePresent_ ||
+                         strcmp(reason.c_str(), failureReason_.c_str()) != 0 ||
+                         strcmp(attemptedVersion.c_str(), failureAttempted_.c_str()) != 0;
+    failurePresent_ = true;
+    failureReason_ = reason;
+    failureAttempted_ = attemptedVersion;
+    failureDetail_ = detail;
+    failureTime_ = time(nullptr);
+    if (isNewEpisode) failureReported_ = false;
+    prefs_.begin(NVS_NAMESPACE, false);
+    prefs_.putString(KEY_FAIL_REASON, failureReason_);
+    prefs_.putString(KEY_FAIL_ATTEMPTED, failureAttempted_);
+    prefs_.putString(KEY_FAIL_DETAIL, failureDetail_);
+    prefs_.putUInt(KEY_FAIL_TIME, (uint32_t)failureTime_);
+    prefs_.putBool(KEY_FAIL_REPORTED, failureReported_);
+    prefs_.end();
+    Serial.printf("OtaHealth: recorded failure reason=%s attempted=%s detail=%s\n",
+                  failureReason_.c_str(), failureAttempted_.c_str(), failureDetail_.c_str());
+}
+
+void OtaHealth::markFailureReported() {
+    if (!failurePresent_ || failureReported_) return;
+    failureReported_ = true;
+    prefs_.begin(NVS_NAMESPACE, false);
+    prefs_.putBool(KEY_FAIL_REPORTED, true);
+    prefs_.end();
+}
+
+void OtaHealth::clearFailure() {
+    if (!failurePresent_) return;
+    failurePresent_ = false;
+    failureReason_ = "";
+    failureAttempted_ = "";
+    failureDetail_ = "";
+    failureTime_ = 0;
+    failureReported_ = false;
+    prefs_.begin(NVS_NAMESPACE, false);
+    prefs_.remove(KEY_FAIL_REASON);
+    prefs_.remove(KEY_FAIL_ATTEMPTED);
+    prefs_.remove(KEY_FAIL_DETAIL);
+    prefs_.remove(KEY_FAIL_TIME);
+    prefs_.remove(KEY_FAIL_REPORTED);
     prefs_.end();
 }
 
@@ -80,6 +142,8 @@ void OtaHealth::checkBootHealth() {
     if (rolledBack) {
         Serial.printf("OtaHealth: %s was rolled back to %s (reset reason: %s)\n",
                       pendingVersion_.c_str(), FIRMWARE_VERSION, resetReasonToString(esp_reset_reason()));
+        String detail = String("boot_reset_") + resetReasonToString(esp_reset_reason());
+        recordFailure("boot_rollback", pendingVersion_, detail);
         clearPendingOta();
         return;
     }
@@ -93,6 +157,8 @@ void OtaHealth::checkBootHealth() {
 
         if (bootAttempts_ > OTA_MAX_UNCONFIRMED_BOOT_ATTEMPTS) {
             Serial.println("OtaHealth: exceeded max unconfirmed boots — forcing rollback to previous firmware");
+            String detail = String("unconfirmed_") + (long)bootAttempts_ + "_boots_reset_" + resetReasonToString(esp_reset_reason());
+            recordFailure("unconfirmed_boot", pendingVersion_, detail);
             clearPendingOta();
             Serial.flush();
             esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
