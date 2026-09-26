@@ -909,6 +909,14 @@ void drawSnapshot(const ClockSnapshot &s) {
   }
 }
 
+// Call after pushing any non-clock screen (Syncing, maintenance, installing
+// update) to the panel: previousFrame no longer describes what's physically
+// displayed, so the next refreshClockDisplay() must do a real full refresh
+// rather than prime a partial with a stale clock-face reconstruction.
+void invalidatePreviousFrame() {
+  havePreviousFrame = false;
+}
+
 // Captures the current state, draws and pushes the clock face to the
 // panel, and records what was drawn for next wake's reconstruction.
 //
@@ -1325,6 +1333,7 @@ void checkForFirmwareUpdate(bool forceCheck = false) {
 #ifdef EPAPER_ENABLE
   drawUpdateScreen(tag);
   epaper.update();
+  invalidatePreviousFrame();
 #endif
 
   String errorDetail;
@@ -1553,6 +1562,7 @@ void setup() {
     sdfDrawTextTL(epaper, InterRegular, SCREEN_W - 40 - fwW, SCREEN_H - 26 - FONT_PX_BODY, fwStr, FONT_PX_BODY, 1.0f, TFT_BLACK);
 
     epaper.update();
+    invalidatePreviousFrame();
 
     connectWiFi();
     if (syncNTP()) {
@@ -1605,6 +1615,7 @@ void setup() {
     maintenanceMode = true;
     drawMaintenanceScreen();
     epaper.update();
+    invalidatePreviousFrame();
     maintenanceStartedAt = millis();
   } else {
     // Force the check on any boot that didn't resume from our own deep
