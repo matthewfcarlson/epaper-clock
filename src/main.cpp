@@ -721,7 +721,10 @@ void drawClock(const ClockSnapshot &s) {
   int fontPxAmpm = (int)lroundf(pixelHeight * (42.0f / 250.0f));
   int dotR = (int)lroundf(pixelHeight * (14.0f / 250.0f));
   int dotSpacing = (int)lroundf(pixelHeight * (45.0f / 250.0f));
-  int colonCenterOffset = (int)lroundf(pixelHeight * (105.0f / 250.0f));
+  // Centre the colon on the digit glyph's actual vertical midpoint (the SDF
+  // padding is symmetric, so the bitmap midpoint is the ink midpoint) rather
+  // than a fixed fraction of the em, which sat noticeably above centre.
+  int colonCenterOffset = -(int)lroundf((refDigit->yoff + refDigit->h / 2.0f) * scaleY);
 
   int hourWNatural = sdfTabularDigitsWidth(InterBold, strlen(hourStr), pixelHeight);
   int minWNatural = sdfTabularDigitsWidth(InterBold, strlen(minStr), pixelHeight);
@@ -840,7 +843,9 @@ void drawNightClock(const ClockSnapshot &s) {
   // Colon as two filled circles, centered on digit height
   int colonX = xStart + hourW + colonW / 2;
   int dotR = 14;
-  int colonCenter = yPos - 105;
+  const SdfGlyph *refDigit = sdfFindGlyph(InterBold, '0');
+  int colonCenter = yPos + (int)lroundf((refDigit->yoff + refDigit->h / 2.0f) *
+                                        ((float)FONT_PX_CLOCK_DIGITS / (float)InterBold.emPx));
   int dotSpacing = 45;
   epaper.fillCircle(colonX, colonCenter - dotSpacing, dotR, TFT_WHITE);
   epaper.fillCircle(colonX, colonCenter + dotSpacing, dotR, TFT_WHITE);
