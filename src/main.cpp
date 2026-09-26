@@ -1553,16 +1553,22 @@ void setup() {
   bool needSync = !everSynced || (nowEpoch - lastNtpSyncTime >= NTP_SYNC_INTERVAL_S);
 
   if (needSync) {
-    epaper.fillScreen(TFT_WHITE);
-    sdfDrawCentreTextTL(epaper, InterBold, SCREEN_W / 2, SCREEN_H / 2 - 12, "Syncing...", FONT_PX_HEADING, 1.0f, TFT_BLACK);
+    // Only show the Syncing... screen on a fresh power-on/reset, so there's
+    // immediate feedback after plugging the device in. Periodic re-syncs
+    // happen silently behind the existing clock face instead of flashing an
+    // intermediate screen every NTP_SYNC_INTERVAL_S.
+    if (!hasSleptOnce) {
+      epaper.fillScreen(TFT_WHITE);
+      sdfDrawCentreTextTL(epaper, InterBold, SCREEN_W / 2, SCREEN_H / 2 - 12, "Syncing...", FONT_PX_HEADING, 1.0f, TFT_BLACK);
 
-    char fwStr[24];
-    snprintf(fwStr, sizeof(fwStr), "fw %s", FIRMWARE_VERSION);
-    int fwW = sdfTextWidth(InterRegular, fwStr, FONT_PX_BODY);
-    sdfDrawTextTL(epaper, InterRegular, SCREEN_W - 40 - fwW, SCREEN_H - 26 - FONT_PX_BODY, fwStr, FONT_PX_BODY, 1.0f, TFT_BLACK);
+      char fwStr[24];
+      snprintf(fwStr, sizeof(fwStr), "fw %s", FIRMWARE_VERSION);
+      int fwW = sdfTextWidth(InterRegular, fwStr, FONT_PX_BODY);
+      sdfDrawTextTL(epaper, InterRegular, SCREEN_W - 40 - fwW, SCREEN_H - 26 - FONT_PX_BODY, fwStr, FONT_PX_BODY, 1.0f, TFT_BLACK);
 
-    epaper.update();
-    invalidatePreviousFrame();
+      epaper.update();
+      invalidatePreviousFrame();
+    }
 
     connectWiFi();
     if (syncNTP()) {
