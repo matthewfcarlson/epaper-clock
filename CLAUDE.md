@@ -120,7 +120,7 @@ Key simulator behaviors vs. real hardware:
 
 All state that must survive a deep sleep cycle is declared `RTC_DATA_ATTR`. On each wake the device:
 1. Reads battery voltage
-2. Checks if NTP re-sync is due (every 6 hours) — shows "Syncing…" screen if so
+2. Checks if NTP re-sync is due (every 6 hours) — the "Syncing…" screen is only shown on a fresh power-on/reset (`!hasSleptOnce`), so plugging the device in gives immediate feedback; periodic re-syncs run silently behind the existing clock face
 3. Checks if weather re-fetch is due (every 6 hours, daytime only)
 4. Draws the clock and calls `epaper.update()`
 5. Sleeps until the next 5-minute boundary (day) or next 15-minute boundary (night, 11pm–6am). The displayed time is always rounded to the nearest 5-minute mark, matching this cadence.
