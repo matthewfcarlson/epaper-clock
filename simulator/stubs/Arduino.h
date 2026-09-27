@@ -152,6 +152,7 @@ inline SerialClass Serial;
 extern bool g_sleep_requested;
 struct EspClass {
     void restart() { g_sleep_requested = true; }
+    uint32_t getFreeHeap() { return 0; }
 };
 inline EspClass ESP;
 

@@ -16,6 +16,7 @@ struct UpdateClass {
     bool   begin(size_t = UPDATE_SIZE_UNKNOWN) { return false; }
     size_t writeStream(WiFiClient &)            { return 0; }
     bool   end(bool = false)                    { return false; }
+    void   abort()                              {}
     const char *errorString()                   { return "sim: firmware update not supported"; }
 };
 inline UpdateClass Update;

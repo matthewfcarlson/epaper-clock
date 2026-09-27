@@ -79,6 +79,13 @@ const float CALIBRATION_FACTOR = 0.968;
 #define OTA_CHECK_INTERVAL_S (24UL * 60 * 60)
 // Give up retrying a specific release after this many failed download/flash attempts
 #define OTA_MAX_UPDATE_ATTEMPTS 3
+// Within one update attempt: how many times to retry a connection-level
+// (DNS/TCP/TLS) download failure before giving up for this wake, how many
+// redirects to follow, and the per-hop connect/read/TLS-handshake timeout.
+// See downloadAndFlashFirmware().
+#define OTA_DOWNLOAD_TRIES 3
+#define OTA_DOWNLOAD_MAX_REDIRECTS 5
+#define OTA_DOWNLOAD_TIMEOUT_MS 15000
 
 // Lower WiFi TX power to reduce peak radio current during WiFi-active wakes.
 // Default max is WIFI_POWER_19_5dBm; for a router within typical home range
@@ -1321,49 +1328,142 @@ void sanitizeToken(String &s) {
   }
 }
 
+// Returns just the host part of an http(s) URL, for log/diagnostic output —
+// the full redirect target is a long signed S3-style URL that would blow
+// straight through otaLog()'s line buffer and otaLogBuf's whole budget.
+String urlHost(const String &url) {
+  int start = url.indexOf("://");
+  start = (start < 0) ? 0 : start + 3;
+  int end = url.indexOf("/", start);
+  return end < 0 ? url.substring(start) : url.substring(start, end);
+}
+
+// One attempt at downloading the firmware binary at `url` and writing it to
+// the inactive OTA partition, following redirects by hand (see below).
+// Returns true on success; on failure sets `errorDetailOut` (see
+// downloadAndFlashFirmware()) and `retryableOut` — true only for
+// connection-level failures (negative HTTPClient codes, e.g. -1 =
+// HTTPC_ERROR_CONNECTION_REFUSED, which covers DNS failure, TCP connect
+// failure, and TLS handshake failure alike) that happened before anything
+// was written to flash, so a same-wake retry is both safe and worthwhile.
+//
+// Redirects are followed manually, each hop on a brand-new WiFiClientSecure
+// + HTTPClient, instead of via HTTPC_FORCE_FOLLOW_REDIRECTS: GitHub's
+// release-asset URL always 302s from github.com to a different host
+// (objects.githubusercontent.com / release-assets.githubusercontent.com),
+// and the Arduino-ESP32 HTTPClient's built-in redirect handling
+// (HTTPClient::setURL()) reuses the same client object across that host
+// change — it deliberately tries to keep the first hop's socket open for
+// reuse, and otherwise reconnects the already-used WiFiClientSecure to the
+// new host — the most likely culprit behind issue #12 ("Firmware download
+// HTTP error: -1" on a wake whose api.github.com call had just succeeded),
+// which also reported only a bare -1 with no hint of which hop failed. A fresh TLS
+// client per hop sidesteps the reuse path entirely, and makes it possible to
+// log exactly which host couldn't be reached.
+bool downloadAndFlashOnce(const String &url, String &errorDetailOut, bool &retryableOut) {
+  retryableOut = false;
+  String hopUrl = url;
+
+  for (int hop = 0; hop <= OTA_DOWNLOAD_MAX_REDIRECTS; hop++) {
+    String host = urlHost(hopUrl);
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setHandshakeTimeout(OTA_DOWNLOAD_TIMEOUT_MS / 1000);
+    HTTPClient http;
+    http.setConnectTimeout(OTA_DOWNLOAD_TIMEOUT_MS);
+    http.setTimeout(OTA_DOWNLOAD_TIMEOUT_MS);
+    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    if (!http.begin(client, hopUrl)) {
+      otaLog("Firmware download: bad URL at hop %d (%s)", hop, host.c_str());
+      errorDetailOut = String("download_badurl_hop") + hop;
+      return false;
+    }
+    http.addHeader("User-Agent", "epaper-clock-ota");
+    http.addHeader("Accept", "application/octet-stream");
+
+    otaLog("Firmware download hop %d: %s (heap %u)", hop, host.c_str(), (unsigned)ESP.getFreeHeap());
+    int httpCode = http.GET();
+
+    if (httpCode == 301 || httpCode == 302 || httpCode == 303 || httpCode == 307 || httpCode == 308) {
+      String location = http.getLocation();
+      http.end();
+      if (location.length() == 0) {
+        otaLog("Firmware download: HTTP %d with no Location at hop %d", httpCode, hop);
+        errorDetailOut = String("download_http_") + httpCode + "_nolocation_hop" + hop;
+        return false;
+      }
+      if (location[0] == '/') {
+        // Relative redirect — same scheme/host as this hop
+        int pathStart = hopUrl.indexOf("/", hopUrl.indexOf("://") + 3);
+        location = (pathStart < 0 ? hopUrl : hopUrl.substring(0, pathStart)) + location;
+      }
+      hopUrl = location;
+      continue;
+    }
+
+    if (httpCode != 200) {
+      char tlsErr[64] = "";
+      int tlsCode = (httpCode < 0) ? client.lastError(tlsErr, sizeof(tlsErr)) : 0;
+      otaLog("Firmware download HTTP error: %d (%s) at hop %d, host %s",
+             httpCode, HTTPClient::errorToString(httpCode).c_str(), hop, host.c_str());
+      if (tlsCode != 0) otaLog("  TLS error %d: %s", tlsCode, tlsErr);
+      errorDetailOut = String("download_http_") + httpCode + "_hop" + hop;
+      if (tlsCode != 0) errorDetailOut = errorDetailOut + "_tls" + tlsCode;
+      retryableOut = httpCode < 0;
+      http.end();
+      return false;
+    }
+
+    int len = http.getSize();
+    if (!Update.begin(len > 0 ? (size_t)len : UPDATE_SIZE_UNKNOWN)) {
+      otaLog("Update.begin failed: %s", Update.errorString());
+      errorDetailOut = String("update_begin_") + Update.errorString();
+      sanitizeToken(errorDetailOut);
+      http.end();
+      return false;
+    }
+
+    size_t written = Update.writeStream(*http.getStreamPtr());
+    bool ok = (len <= 0 || written == (size_t)len) && Update.end(true);
+    http.end();
+
+    if (!ok) {
+      otaLog("Firmware update failed (%u bytes written): %s", (unsigned)written, Update.errorString());
+      errorDetailOut = String("write_") + (long)written + "of" + len + "_" + Update.errorString();
+      sanitizeToken(errorDetailOut);
+      Update.abort();
+      return false;
+    }
+
+    otaLog("Firmware update written (%u bytes)", (unsigned)written);
+    return true;
+  }
+
+  otaLog("Firmware download: too many redirects");
+  errorDetailOut = "download_too_many_redirects";
+  return false;
+}
+
 // Downloads the firmware binary at `url` and writes it to the inactive OTA
 // partition. Returns true if the write succeeded (caller should then
 // ESP.restart() to boot into it). On failure, `errorDetailOut` is set to a
 // short, space-free token describing what went wrong — surfaced to the user
 // via OtaHealth's failure record (see "OTA failure reporting" in CLAUDE.md).
+// Connection-level failures (DNS/TCP/TLS — see downloadAndFlashOnce()) are
+// retried a few times within this same wake, with a short backoff, before
+// counting as a failed attempt: those are usually transient, and otherwise
+// a single blip costs a whole night's (or OTA_CHECK_INTERVAL_S's) wait.
 bool downloadAndFlashFirmware(const String &url, String &errorDetailOut) {
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  http.begin(client, url.c_str());
-  http.addHeader("User-Agent", "epaper-clock-ota");
-  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);  // GitHub asset URLs redirect to S3
-
-  int httpCode = http.GET();
-  if (httpCode != 200) {
-    otaLog("Firmware download HTTP error: %d", httpCode);
-    errorDetailOut = String("download_http_") + httpCode;
-    http.end();
-    return false;
+  for (int attempt = 1; attempt <= OTA_DOWNLOAD_TRIES; attempt++) {
+    bool retryable = false;
+    if (downloadAndFlashOnce(url, errorDetailOut, retryable)) return true;
+    if (!retryable || attempt == OTA_DOWNLOAD_TRIES) break;
+    if (WiFi.status() != WL_CONNECTED) connectWiFi();
+    unsigned long backoffMs = 2000UL << (attempt - 1);  // 2s, 4s, ...
+    otaLog("Retrying firmware download in %lus (try %d/%d)", backoffMs / 1000, attempt + 1, OTA_DOWNLOAD_TRIES);
+    delay(backoffMs);
   }
-
-  int len = http.getSize();
-  if (!Update.begin(len > 0 ? (size_t)len : UPDATE_SIZE_UNKNOWN)) {
-    otaLog("Update.begin failed: %s", Update.errorString());
-    errorDetailOut = String("update_begin_") + Update.errorString();
-    sanitizeToken(errorDetailOut);
-    http.end();
-    return false;
-  }
-
-  size_t written = Update.writeStream(*http.getStreamPtr());
-  bool ok = (len <= 0 || written == (size_t)len) && Update.end(true);
-  http.end();
-
-  if (!ok) {
-    otaLog("Firmware update failed (%u bytes written): %s", (unsigned)written, Update.errorString());
-    errorDetailOut = String("write_") + (long)written + "of" + len + "_" + Update.errorString();
-    sanitizeToken(errorDetailOut);
-    return false;
-  }
-
-  otaLog("Firmware update written (%u bytes)", (unsigned)written);
-  return true;
+  return false;
 }
 
 // Checks GitHub for a newer release at most once per OTA_CHECK_INTERVAL_S,

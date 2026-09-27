@@ -14,9 +14,14 @@ enum followRedirects_t { HTTPC_DISABLE_FOLLOW_REDIRECTS, HTTPC_FORCE_FOLLOW_REDI
 struct HTTPClient {
     String url_;
     void begin(const char *url)                    { url_ = url; }
-    void begin(WiFiClientSecure &, const char *url) { url_ = url; }
+    bool begin(WiFiClientSecure &, const char *url) { url_ = url; return true; }
+    bool begin(WiFiClientSecure &c, const String &url) { return begin(c, url.c_str()); }
     void addHeader(const char *, const char *)      {}
     void setFollowRedirects(followRedirects_t)      {}
+    void setConnectTimeout(int32_t)                 {}
+    void setTimeout(uint16_t)                       {}
+    String getLocation()                            { return String(""); }
+    static String errorToString(int)                { return String("sim"); }
     int  GET()                                      { return 200; }
     // Auto-reporting (reportOtaFailure() in main.cpp) never actually fires
     // in the simulator — no relay token is ever provisioned, since Serial

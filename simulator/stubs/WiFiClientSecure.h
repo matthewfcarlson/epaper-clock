@@ -6,4 +6,6 @@
 // responses locally (see HTTPClient.h).
 struct WiFiClientSecure {
     void setInsecure() {}
+    void setHandshakeTimeout(unsigned long) {}
+    int  lastError(char *buf, size_t size) { if (size) buf[0] = '\0'; return 0; }
 };
