@@ -84,6 +84,8 @@ make clean        # remove binary
 SIM_TIME=03:30 ./sim night.jpg   # 11pm-6am night window: 15-min wake cadence, weather fetch skipped, nightly GitHub check runs
 ```
 
+`getLocalTime()` in the simulator stub returns false for any year before 2016, matching the real Arduino-ESP32 behavior, so `SIM_TIME=1000 ./sim nosync.jpg` reproduces a device whose NTP sync never succeeded (the clock face shows "Time not set" instead of digits — see `drawTimeUnavailable()`).
+
 With `SIM_CYCLES=1` (the default), the clock stays frozen at that instant for the whole run — rerun with a different value to look elsewhere. With `SIM_CYCLES` > 1 it's just the starting point; the clock still advances between cycles as described above. See `applySimTimeOverride()` in `simulator/main.cpp` and `g_sim_time_override` in `simulator/stubs/time_compat.h`.
 
 **How it works:** `simulator/main.cpp` `#include`s `src/main.cpp` directly as a C++ translation unit (its `config.h`/`version.h`/`BigDigits.h`/`ota_health.h` includes resolve against `src/`, since that's `main.cpp`'s own directory), and the Makefile separately compiles `src/ota_health.cpp` as its own translation unit and links it in. `simulator/stubs/` provides thin header replacements for every Arduino/ESP32 API (`Arduino.h`, `WiFi.h`, `WiFiClientSecure.h`, `Update.h`, `HTTPClient.h`, `esp_sleep.h`, `esp_system.h`, `esp_ota_ops.h`, `time_compat.h`, `TFT_eSPI.h`). `EPaperSim.h` implements the `EPaper` class using an SDL2 renderer backed by a persistent render-target texture (`SDL_TEXTUREACCESS_TARGET`) so frames are always readable for JPEG export regardless of backbuffer swap behaviour. Text is rendered via SDL_ttf using the system SFNS font. JPEG encoding uses the bundled `stb_image_write.h` (no extra dependency).

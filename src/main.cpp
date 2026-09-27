@@ -735,6 +735,44 @@ const char *otaFailureHintText(const ClockSnapshot &s) {
   return s.otaFailureReported ? "UPDATE FAILED - REPORTED" : "UPDATE FAILED";
 }
 
+// Weather, bottom-right of the day face: "<hi>°/<lo>°F", or a setup hint
+// until a location/WiFi has been provisioned. dateStr is what's already drawn
+// bottom-left, so a long hint can shrink to fit beside it.
+void drawWeatherCorner(const ClockSnapshot &s, int marginX, int bottomRowY, const char *dateStr) {
+  if (s.weatherValid) {
+    char tempStr[16];
+    snprintf(tempStr, sizeof(tempStr), "%d\xC2\xB0/%d\xC2\xB0", s.weatherHigh, s.weatherLow);
+
+    int tempW = sdfTextWidth(InterBold, tempStr, FONT_PX_LABEL);
+    int x = SCREEN_W - marginX - tempW;
+    sdfDrawTextTL(epaper, InterBold, x, bottomRowY, tempStr, FONT_PX_LABEL, 1.0f, TFT_BLACK);
+  } else if (!s.locationConfigured || !s.wifiCredsAvailable) {
+    // Long hint string can outgrow the space left of the right margin once
+    // the (variable-width) date string on the left is accounted for — shrink
+    // it to fit rather than letting it run into the date.
+    const char *hint = !s.wifiCredsAvailable ? "PRESS BUTTON + CONNECT USB TO SET UP WIFI"
+                                              : "PRESS BUTTON + CONNECT USB TO SET LOCATION";
+    const int hintLetterSpacing = 3;
+    const int gap = 20;
+    int dateW = trackedTextWidth(dateStr, InterBold, FONT_PX_LABEL, 3);
+    int maxHintW = (SCREEN_W - marginX * 2) - dateW - gap;
+    int hintW = trackedTextWidth(hint, InterBold, FONT_PX_LABEL, hintLetterSpacing);
+    float hintScale = (maxHintW > 0 && hintW > maxHintW) ? (float)maxHintW / (float)hintW : 1.0f;
+    hintW = trackedTextWidth(hint, InterBold, FONT_PX_LABEL, hintLetterSpacing, hintScale);
+    drawTrackedText(hint, SCREEN_W - marginX - hintW, bottomRowY, InterBold, FONT_PX_LABEL,
+                     hintLetterSpacing, TFT_BLACK, hintScale);
+  }
+}
+
+// Shown in place of the big digits when there's no valid time to display
+// (NTP has never succeeded since power-on), centered on cy.
+void drawTimeUnavailable(int cy, uint16_t color) {
+  sdfDrawCentreTextTL(epaper, InterBold, SCREEN_W / 2, cy - FONT_PX_HEADING, "Time not set", FONT_PX_HEADING,
+                      1.0f, color);
+  sdfDrawCentreTextTL(epaper, InterRegular, SCREEN_W / 2, cy + 16, "Couldn't reach network time - will retry soon",
+                      FONT_PX_BODY, 1.0f, color);
+}
+
 void drawClock(const ClockSnapshot &s) {
   bool haveTime = s.haveTime;
   int hour = s.hour, min = s.min, wday = s.wday, mday = s.mday, mon = s.mon;
@@ -774,6 +812,25 @@ void drawClock(const ClockSnapshot &s) {
   int bottomRowY = SCREEN_H - marginBottom - FONT_PX_LABEL;
   int ruleY = bottomRowY - 25;
   epaper.fillRect(marginX, ruleY, SCREEN_W - marginX * 2, 1, TFT_BLACK);
+
+  // Date, bottom-left, tracked bold caps, e.g. "11 SEPTEMBER"
+  char dateStr[24];
+  if (haveTime) {
+    snprintf(dateStr, sizeof(dateStr), "%d %s", mday, MONTH_NAMES[mon]);
+  } else {
+    dateStr[0] = '\0';
+  }
+  drawTrackedText(dateStr, marginX, bottomRowY, InterBold, FONT_PX_LABEL, 3);
+
+  drawWeatherCorner(s, marginX, bottomRowY, dateStr);
+
+  // No valid time (NTP has never succeeded since power-on) — the snapshot's
+  // time fields are just zeros, which would otherwise render as a
+  // plausible-looking but wrong "12:00 AM". Say so instead of guessing.
+  if (!haveTime) {
+    drawTimeUnavailable((85 + ruleY) / 2, TFT_BLACK);
+    return;
+  }
 
   // Convert to 12-hour format
   const char *ampm = (hour < 12) ? "AM" : "PM";
@@ -843,41 +900,6 @@ void drawClock(const ClockSnapshot &s) {
   // AM/PM to the right of the digits, bottom-aligned near the digit baseline
   sdfDrawTextTL(epaper, InterBold, xStart + totalW + ampmGap, yPos - (int)lroundf(fontPxAmpm * 1.3f),
                 ampm, fontPxAmpm, 1.0f, TFT_BLACK);
-
-  // Date, bottom-left, tracked bold caps, e.g. "11 SEPTEMBER"
-  char dateStr[24];
-  if (haveTime) {
-    snprintf(dateStr, sizeof(dateStr), "%d %s", mday, MONTH_NAMES[mon]);
-  } else {
-    dateStr[0] = '\0';
-  }
-  drawTrackedText(dateStr, marginX, bottomRowY, InterBold, FONT_PX_LABEL, 3);
-
-  // Weather, bottom-right: "<hi>°/<lo>°F", or a setup hint until a location
-  // has been provisioned.
-  if (s.weatherValid) {
-    char tempStr[16];
-    snprintf(tempStr, sizeof(tempStr), "%d\xC2\xB0/%d\xC2\xB0", s.weatherHigh, s.weatherLow);
-
-    int tempW = sdfTextWidth(InterBold, tempStr, FONT_PX_LABEL);
-    int x = SCREEN_W - marginX - tempW;
-    sdfDrawTextTL(epaper, InterBold, x, bottomRowY, tempStr, FONT_PX_LABEL, 1.0f, TFT_BLACK);
-  } else if (!s.locationConfigured || !s.wifiCredsAvailable) {
-    // Long hint string can outgrow the space left of the right margin once
-    // the (variable-width) date string on the left is accounted for — shrink
-    // it to fit rather than letting it run into the date.
-    const char *hint = !s.wifiCredsAvailable ? "PRESS BUTTON + CONNECT USB TO SET UP WIFI"
-                                              : "PRESS BUTTON + CONNECT USB TO SET LOCATION";
-    const int hintLetterSpacing = 3;
-    const int gap = 20;
-    int dateW = trackedTextWidth(dateStr, InterBold, FONT_PX_LABEL, 3);
-    int maxHintW = (SCREEN_W - marginX * 2) - dateW - gap;
-    int hintW = trackedTextWidth(hint, InterBold, FONT_PX_LABEL, hintLetterSpacing);
-    float hintScale = (maxHintW > 0 && hintW > maxHintW) ? (float)maxHintW / (float)hintW : 1.0f;
-    hintW = trackedTextWidth(hint, InterBold, FONT_PX_LABEL, hintLetterSpacing, hintScale);
-    drawTrackedText(hint, SCREEN_W - marginX - hintW, bottomRowY, InterBold, FONT_PX_LABEL,
-                     hintLetterSpacing, TFT_BLACK, hintScale);
-  }
 }
 
 // Draws "WEEKDAY · AM" (or PM), tracked-out and centered on cx, with a small
@@ -907,6 +929,13 @@ void drawNightClock(const ClockSnapshot &s) {
   int hour = s.hour, min = s.min, wday = s.wday;
 
   epaper.fillScreen(TFT_BLACK);
+
+  // captureCurrentSnapshot() only picks the night face once it has a real
+  // time, so this is just defensive — same reasoning as drawClock().
+  if (!haveTime) {
+    drawTimeUnavailable(SCREEN_H / 2, TFT_WHITE);
+    return;
+  }
 
   const char *ampm = (hour < 12) ? "AM" : "PM";
   int hour12 = hour % 12;

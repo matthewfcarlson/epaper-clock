@@ -22,13 +22,16 @@ inline void configTzTime(const char *tz, const char *, const char * = nullptr) {
     tzset();
 }
 
-// getLocalTime: fills tm from sim_time(); returns true on success
+// getLocalTime: fills tm from sim_time(); returns true on success. Like the
+// real Arduino-ESP32 version, a year before 2016 counts as "not synced yet"
+// and returns false — so e.g. SIM_TIME=1000 reproduces a device whose NTP
+// sync never succeeded.
 inline bool getLocalTime(struct tm *info, int /*timeoutMs*/ = 5000) {
     time_t now = sim_time(nullptr);
     struct tm *t = localtime(&now);
     if (!t) return false;
     *info = *t;
-    return true;
+    return t->tm_year > (2016 - 1900);
 }
 
 // Redirect every remaining time(nullptr)/time(&x) call — throughout
