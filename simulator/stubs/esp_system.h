@@ -1,4 +1,5 @@
 #pragma once
+#include <stdint.h>
 
 // Minimal stand-in for ESP-IDF's esp_system.h — just enough for ota_health.cpp's
 // reset-reason logging and main.cpp's "force an OTA check on any non-deep-sleep
@@ -30,3 +31,10 @@ extern bool g_has_deep_slept;
 inline esp_reset_reason_t esp_reset_reason() {
     return g_has_deep_slept ? ESP_RST_DEEPSLEEP : ESP_RST_POWERON;
 }
+
+// Fake but plausible heap figures — real hardware has ~300KB free SRAM;
+// the simulator has no comparable notion of "free heap" of its own, so this
+// just gives OtaHealth's diagnostic-context gathering something to report
+// (see recordFailure() / gatherBaseContext() in ota_health.cpp).
+inline uint32_t esp_get_free_heap_size() { return 214000; }
+inline uint32_t esp_get_minimum_free_heap_size() { return 198000; }

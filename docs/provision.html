@@ -292,11 +292,15 @@
   // Unescaped otaLogBuf text for the current failure, fetched alongside its
   // status — see refreshOtaStatus() — and handed to otaLogBtn's download.
   let lastOtaLogText = '';
+  // Unescaped diagnostic context (heap/uptime/reset reason/WiFi/battery/
+  // checkpoint) for the current failure, fetched alongside its status.
+  let lastOtaContextText = '';
 
   const OTA_REASON_LABELS = {
     download_flash: 'Downloading or flashing the new firmware failed',
     boot_rollback: 'The device booted the new firmware but it was rolled back',
     unconfirmed_boot: 'The new firmware never confirmed itself healthy and was rolled back',
+    crash: 'The device crashed or hung mid-cycle (not an OTA update)',
   };
 
   function setConnState(text, cls) {
@@ -410,9 +414,16 @@
         } catch (e) {
           lastOtaLogText = '';
         }
+        try {
+          const ctxReply = await sendCommand('CFG GET_OTA_CONTEXT');
+          lastOtaContextText = unescapeOtaLog(ctxReply.replace(/^OTA_CONTEXT /, ''));
+        } catch (e) {
+          lastOtaContextText = '';
+        }
       } else {
         lastOtaStatus = null;
         lastOtaLogText = '';
+        lastOtaContextText = '';
         otaPanel.classList.add('hidden');
       }
     } catch (e) {
@@ -518,6 +529,10 @@
       `**Running firmware:** ${deviceFw || '?'}`,
       `**Detail:** ${lastOtaStatus.detail || 'n/a'}`,
       `**Recorded at:** ${when}`,
+      '',
+      lastOtaContextText
+        ? '**Diagnostics:** (heap headroom, uptime, reset reason, WiFi/battery state, last checkpoint reached)\n```\n' + lastOtaContextText + '\n```'
+        : '',
       '',
       logTail ? '**Recent OTA log:**\n```\n' + logTail + '\n```' : '',
       '',

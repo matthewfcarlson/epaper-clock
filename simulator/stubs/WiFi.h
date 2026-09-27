@@ -17,6 +17,7 @@ struct WiFiClass {
     void begin(const char *, const char *, int32_t, const uint8_t *) {}
     void setTxPower(wifi_power_t)   {}
     int  status()                   { return WL_CONNECTED; }
+    int  RSSI()                     { return -55; }
     IPAddress localIP()             { IPAddress ip; ip.bytes[0]=127; ip.bytes[3]=1; return ip; }
     void disconnect(bool = false)   {}
     int32_t channel()                { return 1; }

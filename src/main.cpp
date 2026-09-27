@@ -87,6 +87,16 @@ const float CALIBRATION_FACTOR = 0.968;
 
 // Persistent across deep sleep
 RTC_DATA_ATTR uint32_t wakeCount = 0;
+// Generic crash guard, independent of OtaHealth's OTA-rollback-specific one
+// (see ota_health.h). Set true once a wake cycle begins doing real work,
+// cleared right before the cycle either sleeps successfully (enterDeepSleep())
+// or restarts intentionally (CFG REBOOT, a freshly-flashed OTA rebooting
+// into itself). If it's still true on a boot that isn't a resume from our
+// own deep sleep, the *previous* cycle crashed/hung somewhere in between —
+// see the crash check near the top of setup(). lastCheckpoint records
+// roughly which phase that was.
+RTC_DATA_ATTR bool wakeInProgress = false;
+RTC_DATA_ATTR char lastCheckpoint[20] = "boot";
 RTC_DATA_ATTR bool everSynced = false;
 RTC_DATA_ATTR bool hasSleptOnce = false;
 RTC_DATA_ATTR int weatherHigh = 0;
@@ -136,6 +146,7 @@ struct ClockSnapshot {
   bool locationConfigured;
   bool wifiCredsAvailable;
   bool otaFailurePending;
+  bool otaFailureIsCrash;  // reason=="crash" — same hint slot, different wording
 };
 
 // The previous wake's snapshot and whether it's usable to reconstruct a
@@ -213,6 +224,31 @@ bool maintenanceMode = false;
 unsigned long maintenanceStartedAt = 0;
 
 OtaHealth otaHealth;
+
+// Records roughly where in the wake cycle execution currently is, so a
+// crash report (see the crash check in setup()) can say more than "it
+// crashed" — `name` must be a short, space-free token (embedded directly in
+// diagnostic context strings, no escaping). Call before each major phase.
+// Also drops a breadcrumb into otaLogBuf (via otaLog()) so a crash outside
+// the OTA path (e.g. mid weather-fetch) still ships a timeline of recent
+// phase transitions with its report, instead of an OTA log section that's
+// empty or stale — one generic instrumentation point rather than threading
+// otaLog() calls through every risky function individually.
+void setCheckpoint(const char *name) {
+  strncpy(lastCheckpoint, name, sizeof(lastCheckpoint) - 1);
+  lastCheckpoint[sizeof(lastCheckpoint) - 1] = '\0';
+  otaLog("checkpoint: %s", lastCheckpoint);
+}
+
+// Context main.cpp can see that OtaHealth can't gather on its own (WiFi/
+// battery/checkpoint state) — appended to OtaHealth's own auto-gathered
+// context (heap/uptime/reset-reason) by recordFailure()'s extraContext
+// param. See "OTA failure reporting" in CLAUDE.md.
+String buildExtraDiagContext() {
+  String rssi = (WiFi.status() == WL_CONNECTED) ? String(WiFi.RSSI()) : String("n/a");
+  return String("wake=") + String((int)wakeCount) + " checkpoint=" + String(lastCheckpoint) +
+         " battery_v=" + String(lastVoltage, 2) + " wifi_rssi=" + rssi;
+}
 
 // User-provisioned weather location (see "Location provisioning" in
 // CLAUDE.md), persisted in NVS via Preferences rather than RTC_DATA_ATTR —
@@ -373,6 +409,18 @@ bool wifiCredentialsAvailable() { return activeWifiSsid()[0] != '\0'; }
 //     otaLogBuf's contents (recent OTA-path log lines), with '\' and
 //     newlines escaped (see escapeOtaLog()) so multi-line content still fits
 //     one reply line — unescape client-side before displaying/downloading.
+//   CFG GET_OTA_CONTEXT         -> >>OTA_CONTEXT <escaped text>
+//     Diagnostic context captured at the moment the current failure was
+//     recorded (heap headroom, uptime, reset reason, WiFi RSSI, battery
+//     voltage, wake count, last checkpoint reached) — see
+//     OtaHealth::failureContext() and "OTA failure reporting" in CLAUDE.md.
+//     Escaped the same way as GET_OTA_LOG, for the same reason (it's a
+//     space-separated key=value string, but kept off the OTA_STATUS line so
+//     that line's own space-delimited parsing never has to worry about it).
+//     reason=crash is a failure OtaHealth records the same way as a real
+//     OTA failure, but for a wake cycle that crashed/hung for any other
+//     reason (see wakeInProgress in main.cpp) — detail is
+//     "checkpoint_<phase>", the last phase setCheckpoint() reached.
 //   CFG SET_REPORT_TOKEN <tok>  -> >>OK SET_REPORT_TOKEN | >>ERR RANGE
 //     Optional: a shared secret for the OTA-failure relay Worker (see
 //     cloudflare-worker/), used only by reportOtaFailure() to authorize a
@@ -417,6 +465,9 @@ void handleSerialProvisioning() {
     } else if (strcmp(lineBuf, "CFG GET_OTA_LOG") == 0) {
       Serial.print(">>OTA_LOG ");
       Serial.println(escapeOtaLog(otaLogBuf));
+    } else if (strcmp(lineBuf, "CFG GET_OTA_CONTEXT") == 0) {
+      Serial.print(">>OTA_CONTEXT ");
+      Serial.println(escapeOtaLog(otaHealth.failureContext().c_str()));
     } else if (strncmp(lineBuf, "CFG SET_REPORT_TOKEN ", sizeof("CFG SET_REPORT_TOKEN ") - 1) == 0) {
       const char *tok = lineBuf + (sizeof("CFG SET_REPORT_TOKEN ") - 1);
       if (strlen(tok) == 0 || strlen(tok) > sizeof(userReportToken) - 1) {
@@ -460,6 +511,7 @@ void handleSerialProvisioning() {
       }
     } else if (strcmp(lineBuf, "CFG REBOOT") == 0) {
       Serial.println(">>OK REBOOT");
+      wakeInProgress = false;  // intentional restart, not a crash — see setup()
       Serial.flush();
       delay(100);
       ESP.restart();
@@ -667,7 +719,7 @@ void drawClock(const ClockSnapshot &s) {
   // CLAUDE.md. Pushes the battery icon below it when both are showing.
   int topRightY = 30;
   if (s.otaFailurePending) {
-    const char *hint = "UPDATE FAILED - PRESS BUTTON";
+    const char *hint = s.otaFailureIsCrash ? "CRASH DETECTED - PRESS BUTTON" : "UPDATE FAILED - PRESS BUTTON";
     const int hintLetterSpacing = 2;
     int hintW = trackedTextWidth(hint, InterBold, FONT_PX_LABEL, hintLetterSpacing);
     drawTrackedText(hint, SCREEN_W - marginX - hintW, topRightY, InterBold, FONT_PX_LABEL,
@@ -857,7 +909,7 @@ void drawNightClock(const ClockSnapshot &s) {
   // Same OTA-failure hint as the day face (see drawClock()), small and
   // centered beneath the caption so it doesn't compete with the time.
   if (s.otaFailurePending) {
-    const char *hint = "UPDATE FAILED - PRESS BUTTON";
+    const char *hint = s.otaFailureIsCrash ? "CRASH DETECTED - PRESS BUTTON" : "UPDATE FAILED - PRESS BUTTON";
     const int hintLetterSpacing = 2;
     int hintW = trackedTextWidth(hint, InterBold, FONT_PX_NIGHT_CAPTION, hintLetterSpacing);
     drawTrackedText(hint, SCREEN_W / 2 - hintW / 2, yPos + 90, InterBold, FONT_PX_NIGHT_CAPTION,
@@ -896,6 +948,7 @@ ClockSnapshot captureCurrentSnapshot(float batteryVoltage) {
   s.locationConfigured = locationConfigured;
   s.wifiCredsAvailable = wifiCredentialsAvailable();
   s.otaFailurePending = otaHealth.hasFailure();
+  s.otaFailureIsCrash = otaHealth.hasFailure() && otaHealth.failureReason() == "crash";
   return s;
 }
 
@@ -1334,6 +1387,7 @@ void checkForFirmwareUpdate(bool forceCheck = false) {
     otaHealth.clearFailure();  // this attempt is flashing cleanly — drop any stale record
     otaHealth.recordOtaAttempt(FIRMWARE_VERSION, tag);
     otaLog("Update installed - restarting");
+    wakeInProgress = false;  // intentional restart into the new build, not a crash — see setup()
     Serial.flush();
     delay(200);
     ESP.restart();
@@ -1346,7 +1400,7 @@ void checkForFirmwareUpdate(bool forceCheck = false) {
       otaFailCount = 1;
     }
     String detail = errorDetail + "_attempt" + otaFailCount;
-    otaHealth.recordFailure("download_flash", tag, detail);
+    otaHealth.recordFailure("download_flash", tag, detail, buildExtraDiagContext());
   }
 }
 
@@ -1400,7 +1454,8 @@ void reportOtaFailure() {
                 "\",\"detail\":\"" + jsonEscape(otaHealth.failureDetail()) +
                 "\",\"fw\":\"" + jsonEscape(FIRMWARE_VERSION) +
                 "\",\"at\":" + (long)otaHealth.failureTime() +
-                ",\"log\":\"" + jsonEscape(otaLogBuf) + "\"}";
+                ",\"context\":\"" + jsonEscape(otaHealth.failureContext()) +
+                "\",\"log\":\"" + jsonEscape(otaLogBuf) + "\"}";
 
   WiFiClientSecure client;
   client.setInsecure();
@@ -1422,6 +1477,10 @@ void reportOtaFailure() {
 }
 
 void enterDeepSleep(uint64_t sleepUs) {
+  // This cycle is completing normally — clear the crash guard so the next
+  // boot's freshStart/wakeInProgress check (see setup()) doesn't misfire.
+  wakeInProgress = false;
+
   // Turn off WiFi before sleeping
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
@@ -1466,7 +1525,8 @@ void setup() {
   Serial.begin(115200);
 
   // As early as possible, before anything else has a chance to crash — see
-  // ota_health.h for what this detects/enforces.
+  // ota_health.h for what this detects/enforces. May reboot (forced
+  // rollback) and not return.
   otaHealth.begin();
   otaHealth.checkBootHealth();
 
@@ -1502,11 +1562,26 @@ void setup() {
 
   // Read battery voltage
   float voltage = readBatteryVoltage();
+  lastVoltage = voltage;  // available globally for the rest of this boot (diagnostics, display)
 
   // Print the results
   Serial.print("Battery Voltage: ");
   Serial.print(voltage, 2);  // Print with 2 decimal places
   Serial.println("V");
+
+  // Generic crash guard (see wakeInProgress above). Checked here — after
+  // checkBootHealth()'s more specific OTA-rollback handling, and once we
+  // have a real battery reading to attach — rather than at the very top of
+  // setup(), so a crash inside NVS loading/checkBootHealth() itself (small,
+  // low-risk code) isn't covered; everything from here on (NTP, weather,
+  // OTA check, display rendering) is.
+  bool freshStart = (esp_reset_reason() != ESP_RST_DEEPSLEEP);
+  if (freshStart && wakeInProgress) {
+    String detail = String("checkpoint_") + lastCheckpoint;
+    otaHealth.recordFailure("crash", FIRMWARE_VERSION, detail, buildExtraDiagContext());
+  }
+  wakeInProgress = true;
+  setCheckpoint("setup");
 
   // Configure button pins as inputs with internal pull-up resistors
   pinMode(BUTTON_D1, INPUT_PULLUP);
@@ -1544,6 +1619,7 @@ void setup() {
   bool needSync = !everSynced || (nowEpoch - lastNtpSyncTime >= NTP_SYNC_INTERVAL_S);
 
   if (needSync) {
+    setCheckpoint("ntp_sync");
     epaper.fillScreen(TFT_WHITE);
     sdfDrawCentreTextTL(epaper, InterBold, SCREEN_W / 2, SCREEN_H / 2 - 12, "Syncing...", FONT_PX_HEADING, 1.0f, TFT_BLACK);
 
@@ -1578,6 +1654,7 @@ void setup() {
   bool weatherDue = (weatherNow - lastWeatherSyncTime) >= WEATHER_SYNC_INTERVAL_S;
   bool shouldFetchWeather = locationConfigured && isDaytime && (weatherDue || (weatherRetries > 0 && weatherRetries <= WEATHER_MAX_RETRIES));
   if (shouldFetchWeather) {
+    setCheckpoint("weather_fetch");
     if (WiFi.status() != WL_CONNECTED) {
       connectWiFi();
     }
@@ -1612,8 +1689,9 @@ void setup() {
     // (e.g. the CFG REBOOT provisioning command), a watchdog/panic recovery,
     // a brownout, etc. — rather than only on the device's very first-ever
     // boot. A normal periodic wake reports ESP_RST_DEEPSLEEP here and stays
-    // on the usual night-window/24h-throttle gate.
-    bool freshStart = (esp_reset_reason() != ESP_RST_DEEPSLEEP);
+    // on the usual night-window/24h-throttle gate. (freshStart itself was
+    // computed earlier, for the crash-guard check above.)
+    setCheckpoint("ota_check");
     checkForFirmwareUpdate(freshStart);  // may flash new firmware and reboot; does not return in that case
     // Independent of the night-window/throttle gate above: tries once per
     // wake to auto-file any not-yet-reported OTA failure via the relay
@@ -1622,7 +1700,7 @@ void setup() {
     // if no relay is configured or nothing's pending. See "OTA failure
     // reporting" in CLAUDE.md.
     reportOtaFailure();
-    lastVoltage = voltage;
+    setCheckpoint("display_refresh");
     refreshClockDisplay(lastVoltage);
   }
 

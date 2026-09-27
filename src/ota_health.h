@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include <esp_system.h>
 #include <time.h>
 
 /**
@@ -57,13 +58,27 @@ public:
     // after too many unconfirmed boots (both in checkBootHealth() below).
     // `reason` and `detail` are short, space-free tokens (not free text) so they
     // fit the line-based CFG wire protocol unescaped.
-    void recordFailure(const String& reason, const String& attemptedVersion, const String& detail);
+    // `extraContext` is caller-supplied, appended to the diagnostic context
+    // this always gathers itself (free heap, low-water-mark heap, uptime,
+    // reset reason — see gatherBaseContext() in ota_health.cpp) — e.g.
+    // main.cpp adds WiFi RSSI, battery voltage, wake count and its own
+    // last-checkpoint breadcrumb for failures it detects. See
+    // failureContext() and "OTA failure reporting" in CLAUDE.md.
+    void recordFailure(const String& reason, const String& attemptedVersion, const String& detail,
+                        const String& extraContext = "");
     bool hasFailure() const { return failurePresent_; }
     const String& failureReason() const { return failureReason_; }
     const String& failureAttemptedVersion() const { return failureAttempted_; }
     const String& failureDetail() const { return failureDetail_; }
+    const String& failureContext() const { return failureContext_; }
     time_t failureTime() const { return failureTime_; }
     void clearFailure();
+
+    // Human-readable reset-reason token (e.g. "panic", "task_wdt",
+    // "deepsleep") — exposed so callers outside this class (main.cpp's own
+    // crash detection) can build consistent detail/context strings without
+    // duplicating the lookup table.
+    static String resetReasonToString(esp_reset_reason_t reason);
 
     // Whether reportOtaFailure() (src/main.cpp) has already
     // auto-filed a GitHub issue for the *current* failure. recordFailure()
@@ -85,6 +100,7 @@ private:
     String failureReason_;
     String failureAttempted_;
     String failureDetail_;
+    String failureContext_;
     time_t failureTime_ = 0;
     bool failureReported_ = false;
 

@@ -218,6 +218,7 @@ function issueDetailsMarkdown(payload, when) {
     `**Running firmware:** ${payload.fw || "?"}\n` +
     `**Detail:** ${payload.detail || "n/a"}\n` +
     `**Recorded at:** ${when}` +
+    (payload.context ? `\n\n**Diagnostics:** (heap headroom, uptime, reset reason, WiFi/battery state, last checkpoint reached)\n\`\`\`\n${payload.context}\n\`\`\`` : "") +
     (logTail ? `\n\n**Recent OTA log:**\n\`\`\`\n${logTail}\n\`\`\`` : "")
   );
 }
@@ -279,7 +280,12 @@ async function fileOrDedupeIssue(env, token, payload) {
     return { ok: true, action: "commented", issue_number: issue.number };
   }
 
-  const title = `OTA update failed: ${payload.reason} (attempted ${payload.attempted})`;
+  // "crash" isn't an OTA outcome at all (see wakeInProgress in main.cpp) —
+  // give it its own title wording rather than the misleading "OTA update
+  // failed: crash".
+  const title = payload.reason === "crash"
+    ? `Device crashed (firmware ${payload.attempted})`
+    : `OTA update failed: ${payload.reason} (attempted ${payload.attempted})`;
   const body =
     `${details}\n\n` +
     `<!-- ${SIGNATURE_PREFIX}${signature} -->\n` +
