@@ -147,6 +147,7 @@ struct ClockSnapshot {
   bool wifiCredsAvailable;
   bool otaFailurePending;
   bool otaFailureIsCrash;  // reason=="crash" — same hint slot, different wording
+  bool otaFailureReported; // relay accepted it — hint says "REPORTED" instead
 };
 
 // The previous wake's snapshot and whether it's usable to reconstruct a
@@ -702,6 +703,31 @@ int getBatteryPercent(float voltage) {
   return percent;
 }
 
+// How long the clock face keeps saying "... REPORTED" after the relay has
+// accepted a failure report before dropping the hint entirely. The record
+// itself stays in NVS (docs/provision.html can still read/dismiss it); this
+// only decides what the wall-mounted face shows.
+const time_t OTA_FAILURE_HINT_AFTER_REPORT_S = 24 * 3600;
+
+// Whether the clock face should show the OTA-failure hint at all: always
+// while a failure is pending and not yet reported, and for
+// OTA_FAILURE_HINT_AFTER_REPORT_S after a successful report. If either
+// timestamp predates NTP sync (can't measure the interval), keep showing it.
+bool otaFailureHintVisible() {
+  if (!otaHealth.hasFailure()) return false;
+  if (!otaHealth.failureReported()) return true;
+  const time_t minValidEpoch = 1600000000;  // Sep 2020 — anything earlier is an unsynced clock
+  time_t reportedAt = otaHealth.failureReportedAt();
+  time_t now = time(nullptr);
+  if (reportedAt < minValidEpoch || now < reportedAt) return true;
+  return (now - reportedAt) < OTA_FAILURE_HINT_AFTER_REPORT_S;
+}
+
+const char *otaFailureHintText(const ClockSnapshot &s) {
+  if (s.otaFailureIsCrash) return s.otaFailureReported ? "CRASH DETECTED - REPORTED" : "CRASH DETECTED";
+  return s.otaFailureReported ? "UPDATE FAILED - REPORTED" : "UPDATE FAILED";
+}
+
 void drawClock(const ClockSnapshot &s) {
   bool haveTime = s.haveTime;
   int hour = s.hour, min = s.min, wday = s.wday, mday = s.mday, mon = s.mon;
@@ -713,13 +739,14 @@ void drawClock(const ClockSnapshot &s) {
   // Weekday, top-left, tracked bold caps
   drawTrackedText(haveTime ? WEEKDAY_NAMES[wday] : "", marginX, 30, InterBold, FONT_PX_WEEKDAY, 6);
 
-  // OTA-failure hint, top-right — shown until the user dismisses it (CFG
-  // CLEAR_OTA_STATUS, sent by docs/provision.html once they've seen/reported
-  // it). See OtaHealth::recordFailure() and "OTA failure reporting" in
-  // CLAUDE.md. Pushes the battery icon below it when both are showing.
+  // OTA-failure hint, top-right — purely informational (the buttons are on
+  // the back of a wall-mounted device, so nothing here asks the user to
+  // press one): says whether the relay has already filed it, and drops off
+  // on its own a while after that — see otaFailureHintVisible(). Pushes the
+  // battery icon below it when both are showing.
   int topRightY = 30;
   if (s.otaFailurePending) {
-    const char *hint = s.otaFailureIsCrash ? "CRASH DETECTED - PRESS BUTTON" : "UPDATE FAILED - PRESS BUTTON";
+    const char *hint = otaFailureHintText(s);
     const int hintLetterSpacing = 2;
     int hintW = trackedTextWidth(hint, InterBold, FONT_PX_LABEL, hintLetterSpacing);
     drawTrackedText(hint, SCREEN_W - marginX - hintW, topRightY, InterBold, FONT_PX_LABEL,
@@ -909,7 +936,7 @@ void drawNightClock(const ClockSnapshot &s) {
   // Same OTA-failure hint as the day face (see drawClock()), small and
   // centered beneath the caption so it doesn't compete with the time.
   if (s.otaFailurePending) {
-    const char *hint = s.otaFailureIsCrash ? "CRASH DETECTED - PRESS BUTTON" : "UPDATE FAILED - PRESS BUTTON";
+    const char *hint = otaFailureHintText(s);
     const int hintLetterSpacing = 2;
     int hintW = trackedTextWidth(hint, InterBold, FONT_PX_NIGHT_CAPTION, hintLetterSpacing);
     drawTrackedText(hint, SCREEN_W / 2 - hintW / 2, yPos + 90, InterBold, FONT_PX_NIGHT_CAPTION,
@@ -947,8 +974,9 @@ ClockSnapshot captureCurrentSnapshot(float batteryVoltage) {
   s.weatherLow = weatherLow;
   s.locationConfigured = locationConfigured;
   s.wifiCredsAvailable = wifiCredentialsAvailable();
-  s.otaFailurePending = otaHealth.hasFailure();
+  s.otaFailurePending = otaFailureHintVisible();
   s.otaFailureIsCrash = otaHealth.hasFailure() && otaHealth.failureReason() == "crash";
+  s.otaFailureReported = otaHealth.hasFailure() && otaHealth.failureReported();
   return s;
 }
 

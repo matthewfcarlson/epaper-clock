@@ -14,6 +14,7 @@ static const char* KEY_FAIL_DETAIL = "fail_detail";
 static const char* KEY_FAIL_CONTEXT = "fail_ctx";
 static const char* KEY_FAIL_TIME = "fail_time";
 static const char* KEY_FAIL_REPORTED = "fail_reported";
+static const char* KEY_FAIL_REPORTED_AT = "fail_rep_at";
 
 String OtaHealth::resetReasonToString(esp_reset_reason_t reason) {
     switch (reason) {
@@ -65,6 +66,7 @@ void OtaHealth::loadFromNVS() {
     failureContext_ = prefs_.getString(KEY_FAIL_CONTEXT, "");
     failureTime_ = (time_t)prefs_.getUInt(KEY_FAIL_TIME, 0);
     failureReported_ = prefs_.getBool(KEY_FAIL_REPORTED, false);
+    failureReportedAt_ = (time_t)prefs_.getUInt(KEY_FAIL_REPORTED_AT, 0);
     failurePresent_ = failureReason_.length() > 0;
     prefs_.end();
 }
@@ -104,7 +106,10 @@ void OtaHealth::recordFailure(const String& reason, const String& attemptedVersi
     failureContext_ = gatherBaseContext();
     if (extraContext.length() > 0) failureContext_ = failureContext_ + " " + extraContext;
     failureTime_ = time(nullptr);
-    if (isNewEpisode) failureReported_ = false;
+    if (isNewEpisode) {
+        failureReported_ = false;
+        failureReportedAt_ = 0;
+    }
     prefs_.begin(NVS_NAMESPACE, false);
     prefs_.putString(KEY_FAIL_REASON, failureReason_);
     prefs_.putString(KEY_FAIL_ATTEMPTED, failureAttempted_);
@@ -112,6 +117,7 @@ void OtaHealth::recordFailure(const String& reason, const String& attemptedVersi
     prefs_.putString(KEY_FAIL_CONTEXT, failureContext_);
     prefs_.putUInt(KEY_FAIL_TIME, (uint32_t)failureTime_);
     prefs_.putBool(KEY_FAIL_REPORTED, failureReported_);
+    prefs_.putUInt(KEY_FAIL_REPORTED_AT, (uint32_t)failureReportedAt_);
     prefs_.end();
     Serial.printf("OtaHealth: recorded failure reason=%s attempted=%s detail=%s context=%s\n",
                   failureReason_.c_str(), failureAttempted_.c_str(), failureDetail_.c_str(), failureContext_.c_str());
@@ -120,8 +126,10 @@ void OtaHealth::recordFailure(const String& reason, const String& attemptedVersi
 void OtaHealth::markFailureReported() {
     if (!failurePresent_ || failureReported_) return;
     failureReported_ = true;
+    failureReportedAt_ = time(nullptr);
     prefs_.begin(NVS_NAMESPACE, false);
     prefs_.putBool(KEY_FAIL_REPORTED, true);
+    prefs_.putUInt(KEY_FAIL_REPORTED_AT, (uint32_t)failureReportedAt_);
     prefs_.end();
 }
 
@@ -134,6 +142,7 @@ void OtaHealth::clearFailure() {
     failureContext_ = "";
     failureTime_ = 0;
     failureReported_ = false;
+    failureReportedAt_ = 0;
     prefs_.begin(NVS_NAMESPACE, false);
     prefs_.remove(KEY_FAIL_REASON);
     prefs_.remove(KEY_FAIL_ATTEMPTED);
@@ -141,6 +150,7 @@ void OtaHealth::clearFailure() {
     prefs_.remove(KEY_FAIL_CONTEXT);
     prefs_.remove(KEY_FAIL_TIME);
     prefs_.remove(KEY_FAIL_REPORTED);
+    prefs_.remove(KEY_FAIL_REPORTED_AT);
     prefs_.end();
 }
 

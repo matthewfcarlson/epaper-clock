@@ -88,6 +88,11 @@ public:
     // record so a power cycle can't cause a duplicate issue to be filed for
     // what's still the same underlying failure.
     bool failureReported() const { return failureReported_; }
+    // When markFailureReported() ran (time(nullptr) at that moment — may be
+    // a pre-NTP epoch near 0 if the clock wasn't synced yet), or 0 if not
+    // reported. main.cpp uses it to show "REPORTED" on the clock face for a
+    // while, then drop the hint — see otaFailureHintVisible() there.
+    time_t failureReportedAt() const { return failureReportedAt_; }
     void markFailureReported();
 
 private:
@@ -103,6 +108,7 @@ private:
     String failureContext_;
     time_t failureTime_ = 0;
     bool failureReported_ = false;
+    time_t failureReportedAt_ = 0;
 
     void loadFromNVS();
     void savePendingOta();
