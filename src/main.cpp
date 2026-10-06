@@ -153,8 +153,6 @@ struct ClockSnapshot {
   bool locationConfigured;
   bool wifiCredsAvailable;
   bool otaFailurePending;
-  bool otaFailureIsCrash;  // reason=="crash" — same hint slot, different wording
-  bool otaFailureReported; // relay accepted it — hint says "REPORTED" instead
 };
 
 // The previous wake's snapshot and whether it's usable to reconstruct a
@@ -611,6 +609,18 @@ void drawBatteryIcon(int x, int y, int percent, bool showLabel = true) {
   }
 }
 
+// Warning triangle with a "!" cut out, 34x30px, top-left at (x, y). fg is the
+// triangle, bg the exclamation mark (so it works on either face's colors).
+const int WARNING_ICON_W = 34;
+const int WARNING_ICON_H = 30;
+void drawWarningIcon(int x, int y, uint32_t fg, uint32_t bg) {
+  int cx = x + WARNING_ICON_W / 2;
+  epaper.fillTriangle(cx, y, x, y + WARNING_ICON_H - 1, x + WARNING_ICON_W - 1, y + WARNING_ICON_H - 1, fg);
+  // Exclamation stem + dot
+  epaper.fillRect(cx - 2, y + 10, 4, 11, bg);
+  epaper.fillRect(cx - 2, y + 23, 4, 4, bg);
+}
+
 // Draws one word letter-spaced (tracked-out, all-caps look) starting at x,
 // returning the x position immediately after the last letter. xScale
 // independently condenses glyph width and letter spacing on top of
@@ -730,11 +740,6 @@ bool otaFailureHintVisible() {
   return (now - reportedAt) < OTA_FAILURE_HINT_AFTER_REPORT_S;
 }
 
-const char *otaFailureHintText(const ClockSnapshot &s) {
-  if (s.otaFailureIsCrash) return s.otaFailureReported ? "CRASH DETECTED - REPORTED" : "CRASH DETECTED";
-  return s.otaFailureReported ? "UPDATE FAILED - REPORTED" : "UPDATE FAILED";
-}
-
 // Weather, bottom-right of the day face: "<hi>°/<lo>°F", or a setup hint
 // until a location/WiFi has been provisioned. dateStr is what's already drawn
 // bottom-left, so a long hint can shrink to fit beside it.
@@ -784,27 +789,22 @@ void drawClock(const ClockSnapshot &s) {
   // Weekday, top-left, tracked bold caps
   drawTrackedText(haveTime ? WEEKDAY_NAMES[wday] : "", marginX, 30, InterBold, FONT_PX_WEEKDAY, 6);
 
-  // OTA-failure hint, top-right — purely informational (the buttons are on
-  // the back of a wall-mounted device, so nothing here asks the user to
-  // press one): says whether the relay has already filed it, and drops off
-  // on its own a while after that — see otaFailureHintVisible(). Pushes the
-  // battery icon below it when both are showing.
-  int topRightY = 30;
-  if (s.otaFailurePending) {
-    const char *hint = otaFailureHintText(s);
-    const int hintLetterSpacing = 2;
-    int hintW = trackedTextWidth(hint, InterBold, FONT_PX_LABEL, hintLetterSpacing);
-    drawTrackedText(hint, SCREEN_W - marginX - hintW, topRightY, InterBold, FONT_PX_LABEL,
-                     hintLetterSpacing, TFT_BLACK);
-    topRightY += FONT_PX_LABEL + 14;
-  }
-
-  // Battery icon, top-right, icon only (no percentage text) — only shown
-  // once it's actually low, so it doesn't clutter the face the rest of the
-  // time.
+  // Top-right status icons, laid out right-to-left. Battery icon (no
+  // percentage text) only once it's actually low, so it doesn't clutter the
+  // face the rest of the time.
+  const int topIconY = 30;
+  int iconRight = SCREEN_W - marginX;
   int battPercent = getBatteryPercent(s.batteryVoltage);
   if (battPercent < 20) {
-    drawBatteryIcon(SCREEN_W - marginX - 40, topRightY, battPercent, false);
+    drawBatteryIcon(iconRight - 40, topIconY + 6, battPercent, false);
+    iconRight -= 40 + 16;
+  }
+
+  // OTA-failure/crash warning icon — purely informational (details live in
+  // docs/provision.html and the relay-filed issue), and drops off on its own
+  // a while after a successful report — see otaFailureHintVisible().
+  if (s.otaFailurePending) {
+    drawWarningIcon(iconRight - WARNING_ICON_W, topIconY, TFT_BLACK, TFT_WHITE);
   }
 
   // Bottom bar (rule + date/weather row) sits close to the bottom edge.
@@ -969,14 +969,10 @@ void drawNightClock(const ClockSnapshot &s) {
 
   drawNightCaption(SCREEN_W / 2, yPos + 45, haveTime ? WEEKDAY_NAMES[wday] : "", ampm);
 
-  // Same OTA-failure hint as the day face (see drawClock()), small and
-  // centered beneath the caption so it doesn't compete with the time.
+  // Same OTA-failure warning icon as the day face (see drawClock()), in the
+  // same top-right corner, inverted for the dark face.
   if (s.otaFailurePending) {
-    const char *hint = otaFailureHintText(s);
-    const int hintLetterSpacing = 2;
-    int hintW = trackedTextWidth(hint, InterBold, FONT_PX_NIGHT_CAPTION, hintLetterSpacing);
-    drawTrackedText(hint, SCREEN_W / 2 - hintW / 2, yPos + 90, InterBold, FONT_PX_NIGHT_CAPTION,
-                     hintLetterSpacing, TFT_WHITE);
+    drawWarningIcon(SCREEN_W - 40 - WARNING_ICON_W, 30, TFT_WHITE, TFT_BLACK);
   }
 }
 
@@ -1011,8 +1007,6 @@ ClockSnapshot captureCurrentSnapshot(float batteryVoltage) {
   s.locationConfigured = locationConfigured;
   s.wifiCredsAvailable = wifiCredentialsAvailable();
   s.otaFailurePending = otaFailureHintVisible();
-  s.otaFailureIsCrash = otaHealth.hasFailure() && otaHealth.failureReason() == "crash";
-  s.otaFailureReported = otaHealth.hasFailure() && otaHealth.failureReported();
   return s;
 }
 
